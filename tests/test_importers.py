@@ -198,5 +198,138 @@ class TestTelegramAdapter(unittest.TestCase):
             self.assertTrue(summary["gates_all_pass"])
 
 
+class TestLenientParsing(unittest.TestCase):
+    """O-5d 字段宽容解析：别名表 / 时间戳单位 / CSV 通用支持。"""
+
+    def setUp(self):
+        self.imp = ChatlabJsonlImporter()
+
+    def _parse_jsonl_lines(self, text: str) -> list[dict]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.jsonl"
+            p.write_text(text, encoding="utf-8")
+            return self.imp.parse(p)
+
+    def _parse_csv_rows(self, rows: list[dict]) -> list[dict]:
+        import csv as _csv
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.csv"
+            with open(p, "w", encoding="utf-8-sig", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                w.writeheader()
+                w.writerows(rows)
+            return self.imp.parse(p)
+
+    # ---- 别名表（规范名 > 别名表序） ----
+    def test_alias_ts(self):
+        rows = self._parse_jsonl_lines(
+            '{"ts": 1726010000, "text": "hi", "accountName": "a"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010000)
+        self.assertEqual(rows[0]["content"], "hi")
+
+    def test_alias_time(self):
+        rows = self._parse_jsonl_lines('{"time": 1726010001, "content": "x"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010001)
+
+    def test_alias_message_for_content(self):
+        rows = self._parse_jsonl_lines('{"timestamp": 1726010002, "message": "m"}')
+        self.assertEqual(rows[0]["content"], "m")
+
+    def test_alias_sender_talker_nick(self):
+        rows = self._parse_jsonl_lines(
+            '{"timestamp": 1726010003, "content": "c", "nick": "小样"}')
+        self.assertEqual(rows[0]["accountName"], "小样")
+        rows = self._parse_jsonl_lines(
+            '{"timestamp": 1726010003, "content": "c", "talker": "t1", "nick": "n1"}')
+        self.assertEqual(rows[0]["accountName"], "t1")   # talker 优先于 nick
+
+    def test_canonical_name_wins_over_alias(self):
+        rows = self._parse_jsonl_lines(
+            '{"timestamp": 1726010004, "ts": 999, "content": "c", "text": "old"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010004)
+        self.assertEqual(rows[0]["content"], "c")
+
+    def test_case_insensitive_header(self):
+        rows = self._parse_csv_rows(
+            [{"TimeStamp": "1726010005", "TEXT": "大小写", "Nick": "N"}])
+        self.assertEqual(rows[0]["timestamp"], 1726010005)
+        self.assertEqual(rows[0]["accountName"], "N")
+
+    # ---- 时间戳单位 ----
+    def test_unit_milliseconds(self):
+        rows = self._parse_jsonl_lines('{"ts": 1726010006000, "text": "ms"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010006)
+
+    def test_unit_seconds(self):
+        rows = self._parse_jsonl_lines('{"ts": 1726010007, "text": "s"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010007)
+
+    def test_unit_numeric_string(self):
+        rows = self._parse_jsonl_lines('{"ts": "1726010008", "text": "str"}')
+        self.assertEqual(rows[0]["timestamp"], 1726010008)
+
+    def test_unit_iso_z(self):
+        rows = self._parse_jsonl_lines('{"ts": "2024-09-11T01:30:08Z", "text": "z"}')
+        self.assertEqual(rows[0]["timestamp"], 1726018208)
+
+    def test_unit_iso_offset(self):
+        rows = self._parse_jsonl_lines(
+            '{"ts": "2024-09-11T04:30:08+03:00", "text": "off"}')
+        self.assertEqual(rows[0]["timestamp"], 1726018208)
+
+    def test_unit_iso_naive_is_tz8(self):
+        rows = self._parse_jsonl_lines(
+            '{"ts": "2024-09-11 09:30:08", "text": "naive"}')
+        self.assertEqual(rows[0]["timestamp"], 1726018208)
+
+    def test_bad_timestamp_skipped_and_counted(self):
+        rows = self._parse_jsonl_lines(
+            '{"ts": "not-a-time", "text": "bad"}\n{"ts": 1726010009, "text": "ok"}')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["timestamp"], 1726010009)
+        self.assertEqual(self.imp.stats["skipped_no_time"], 1)
+
+    # ---- CSV 通用支持 ----
+    def test_csv_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "bom.csv"
+            p.write_bytes(
+                b"\xef\xbb\xbf" + "timestamp,content,accountName\n".encode("utf-8") +
+                "1726010010,BOM 内容,A甲\n".encode("utf-8"))
+            self.assertTrue(self.imp.detect(p))
+            rows = self.imp.parse(p)
+            self.assertEqual(rows[0]["content"], "BOM 内容")
+            self.assertEqual(self.imp.stats["encoding"], "utf-8-sig")
+
+    def test_csv_gbk(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "gbk.csv"
+            p.write_text("time,text,sender\n1726010011,中文GBK,B乙\n",
+                         encoding="gbk")
+            rows = self.imp.parse(p)
+            self.assertEqual(rows[0]["content"], "中文GBK")
+            self.assertEqual(rows[0]["accountName"], "B乙")
+            self.assertEqual(self.imp.stats["encoding"], "gbk")
+
+    def test_csv_end_to_end_ingest(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.csv"
+            p.write_text("timestamp,content,accountName\n"
+                         "1726010012,你好,A甲\n1726010132,你好呀,B乙\n",
+                         encoding="utf-8")
+            from phase1_ingest import ingest
+            summary = ingest(p, {"A甲": "A", "B乙": "B"}, db_path=Path(td) / "t.db")
+            self.assertEqual(summary["message_count"], 2)
+            self.assertTrue(summary["gates_all_pass"])
+
+    def test_registry_detect_lenient_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "lenient.jsonl"
+            p.write_text('{"ts": 1726010013, "text": "无_type行"}\n', encoding="utf-8")
+            imp = registry.auto_detect(p)
+            self.assertIsInstance(imp, ChatlabJsonlImporter)
+            self.assertEqual(imp.parse(p)[0]["content"], "无_type行")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
