@@ -1,0 +1,18 @@
+{
+  "name": "Demo Peer",
+  "type": "personal_chat",
+  "id": 123456789,
+  "messages": [
+    {"id": 1, "type": "message", "date": "2024-09-11T09:30:00", "from": "Demo Peer", "from_id": "user111", "text": "TG 合成样本第一句"},
+    {"id": 2, "type": "message", "date": "2024-09-11T09:31:00", "from": "Demo Peer", "from_id": "user111", "text": ["看这个链接 ", {"type": "link", "text": "https://example.com/a"}, " ，还有 ", {"type": "plain", "text": "纯文本段"}, "结尾"]},
+    {"id": 3, "type": "message", "date": "2024-09-11T09:32:00", "from": "Demo Me", "from_id": "user100", "out": true, "text": "我发出的回复"},
+    {"id": 4, "type": "service", "date": "2024-09-11T09:33:00", "action": "phone_call", "text": ""},
+    {"id": 5, "type": "message", "date": "2024-09-11T09:34:00", "from": "Demo Peer", "from_id": "user111", "photo": "photos/photo_1@2024-09-11_09-34-00.jpg", "text": "这是图注"},
+    {"id": 6, "type": "message", "date": "2024-09-11T09:35:00", "from": "Demo Me", "from_id": "user100", "out": true, "sticker": "stickers/sticker_1.webp", "sticker_emoji": "😀"},
+    {"id": 7, "type": "message", "date": "2024-09-11T09:36:00", "from": "Demo Peer", "from_id": "user111", "voice_message": {"duration": 3, "mime_type": "audio/ogg"}},
+    {"id": 8, "type": "message", "date": "2024-09-11T09:37:00", "from": "Demo Peer", "from_id": "user111", "file": "files/doc_1.pdf", "file_name": "说明书.pdf", "text": "文档说明"},
+    {"id": 9, "type": "message", "date": "2024-09-11T02:37:00+03:00", "from": "Demo Me", "from_id": "user100", "out": true, "video_file": "files/video_1.mp4"},
+    {"id": 10, "type": "message", "date": "2024-09-11T09:40:00", "message_edited": "2024-09-11T10:00:00", "from": "Demo Peer", "from_id": "user111", "text": "这条是编辑事件应跳过"},
+    {"id": 11, "type": "message", "date": "2024-09-11T09:41:00", "from": "Stray User", "from_id": "user999", "text": "群杂入行应按双人判定跳过"}
+  ]
+}

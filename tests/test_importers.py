@@ -149,5 +149,54 @@ class TestDoctor(unittest.TestCase):
             self.assertFalse(r2["importable"])
 
 
+class TestTelegramAdapter(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from importers.telegram_json import TelegramJsonImporter
+        cls.imp_cls = TelegramJsonImporter
+        cls.imp = TelegramJsonImporter()
+        cls.rows = cls.imp.parse(SAMPLES / "telegram_sample.json")
+
+    def test_detect(self):
+        self.assertTrue(self.imp_cls().detect(SAMPLES / "telegram_sample.json"))
+        self.assertFalse(self.imp_cls().detect(SAMPLES / "wecomsg_sample.csv"))
+        self.assertFalse(self.imp_cls().detect(ROOT / "sample_data" / "chat.sample.jsonl"))
+
+    def test_snapshot(self):
+        from datetime import datetime, timezone as _tz, timedelta as _td
+        ts_off = int(datetime(2024, 9, 11, 2, 37, tzinfo=_tz(_td(hours=3))).timestamp())
+        expect = [
+            _msg(1726018200, 0, "TG 合成样本第一句", "user111", "1"),
+            _msg(1726018260, 0, "看这个链接 https://example.com/a ，还有 纯文本段结尾", "user111", "2"),
+            _msg(1726018320, 0, "我发出的回复", "user100", "3"),
+            _msg(1726018440, 7, "[图片]", "user111", "5-m"),
+            _msg(1726018440, 0, "这是图注", "user111", "5-t"),
+            _msg(1726018500, 7, "sticker_1.webp", "user100", "6-m"),
+            _msg(1726018620, 4, "[文件] 说明书.pdf", "user111", "8-m"),
+            _msg(1726018620, 0, "文档说明", "user111", "8-t"),
+            _msg(ts_off, 4, "[文件] video_1.mp4", "user100", "9-m"),
+        ]
+        self.assertEqual(self.rows, expect)
+
+    def test_skip_counts(self):
+        s = self.imp.stats
+        self.assertEqual(s["total_rows"], 11)
+        self.assertEqual(s["parsed"], 9)
+        self.assertEqual(s["skipped_service"], 1)
+        self.assertEqual(s["skipped_edited"], 1)
+        self.assertEqual(s["skipped_unknown_type"], 1)   # voice_message
+        self.assertEqual(s["skipped_group"], 1)          # 第三发送者 user999
+        self.assertEqual(s["unknown_senders"], ["user999"])
+
+    def test_end_to_end_ingest(self):
+        from phase1_ingest import ingest
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "t.db"
+            summary = ingest(SAMPLES / "telegram_sample.json",
+                             {"user100": "A", "user111": "B"}, db_path=db)
+            self.assertEqual(summary["message_count"], 9)
+            self.assertTrue(summary["gates_all_pass"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
