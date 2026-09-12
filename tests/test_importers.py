@@ -110,5 +110,44 @@ class TestChatlabAdapter(unittest.TestCase):
         self.assertIsNone(registry.auto_detect(SAMPLES / "nonexistent_garbage.bin"))
 
 
+class TestDoctor(unittest.TestCase):
+    def test_wecomsg_report(self):
+        from doctor import run_doctor
+        r = run_doctor(SAMPLES / "wecomsg_sample.csv")
+        self.assertTrue(r["recognized"])
+        self.assertEqual(r["importer"], "wecomsg")
+        self.assertEqual(r["message_count"], 11)
+        self.assertEqual(r["total_rows"], 16)
+        self.assertEqual(r["candidates"][0]["account"], "wxid_demo_peer")
+        self.assertEqual(r["candidates"][1]["account"], "wxid_demo_me")
+        self.assertTrue(r["importable"])
+        self.assertEqual(r["suggested_args"]["format"], "wecomsg")
+        self.assertGreaterEqual(r["privacy_estimate"]["messages_with_hits"], 0)
+        self.assertIsNotNone(r["time_span"])
+
+    def test_chatlab_report(self):
+        from doctor import run_doctor
+        r = run_doctor(ROOT / "sample_data" / "chat.sample.jsonl")
+        self.assertEqual(r["importer"], "chatlab")
+        self.assertTrue(r["importable"])
+        self.assertEqual(len(r["candidates"]), 2)
+        # 建议参数默认 A=消息较多一方；样本中林晚语消息多于沈星然
+        self.assertEqual(r["suggested_args"]["sender_a"], "林晚语")
+        self.assertEqual(r["suggested_args"]["sender_b"], "沈星然")
+
+    def test_garbage_and_missing(self):
+        from doctor import run_doctor
+        with tempfile.TemporaryDirectory() as td:
+            junk = Path(td) / "junk.bin"
+            junk.write_bytes(b"\x00\x01\x02 not a chat export \xff\xfe")
+            r = run_doctor(junk)
+            self.assertFalse(r["recognized"])
+            self.assertFalse(r["importable"])
+            self.assertTrue(r["reasons"])
+            r2 = run_doctor(Path(td) / "no_such_file.bin")
+            self.assertFalse(r2["readable"])
+            self.assertFalse(r2["importable"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

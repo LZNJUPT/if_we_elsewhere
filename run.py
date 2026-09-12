@@ -3,6 +3,7 @@
 """
 IfWe · 一键入口（项目根执行）
 
+  python run.py doctor --source <文件>   # 导入体检：只读识别格式/跨度/账号/结论
   python run.py init      # 生成 config.yaml（首次）；配合 --source/--sender-a/--sender-b 直接导入
   python run.py analyze   # 分析：事件/记忆/关系状态/转折点/人格（--skip-llm 离线路径）
   python run.py server    # 启动本地聊天界面（仅 127.0.0.1）
@@ -77,6 +78,19 @@ def cmd_init(args) -> int:
   4. 启动:      python run.py server
   不想导入真实数据？直接体验: python run.py demo""")
     return 0
+
+
+# ---------------------------------------------------------------- doctor
+def cmd_doctor(args) -> int:
+    """导入体检（只读不写库）：格式识别/跨度/候选账号/类型分布/脱敏预估/结论。"""
+    from doctor import format_report, run_doctor
+
+    src = Path(args.source)
+    if not src.is_absolute():
+        src = ROOT / src
+    report = run_doctor(src)
+    print(format_report(report))
+    return 0 if report.get("importable") else 1
 
 
 # ---------------------------------------------------------------- analyze
@@ -154,6 +168,10 @@ def main() -> int:
     p.add_argument("--sender-a", type=str, default="", help="你的原始账号名 → A")
     p.add_argument("--sender-b", type=str, default="", help="对方的原始账号名 → B")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("doctor", help="导入体检：只读分析聊天文件，不改库")
+    p.add_argument("--source", type=str, required=True, help="导出的聊天记录文件路径")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("analyze", help="生成事件/记忆/关系状态/转折点/人格")
     p.add_argument("--skip-llm", action="store_true",
