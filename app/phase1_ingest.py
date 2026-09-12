@@ -48,17 +48,13 @@ AMOUNT_PAT = re.compile(r"[￥¥]\s*([0-9]+(?:\.[0-9]{1,2})?)")
 
 # ---------- 数据解析 ----------
 def load_raw(src_path: Path) -> list[dict]:
-    """读 Layer0, 返回 list[dict]（消息体, 未修改源文件）"""
-    rows = []
-    with open(src_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            if rec.get("_type") == "message":
-                rows.append(rec)
-    return rows
+    """读 Layer0, 返回 list[dict]（消息体, 未修改源文件）
+
+    v0.2 起逻辑迁入 importers.chatlab_jsonl（行为不变）；本函数保留为薄壳，
+    兼容旧调用。新代码请用 importers.registry.auto_detect + Importer.parse。
+    """
+    from importers.chatlab_jsonl import ChatlabJsonlImporter
+    return ChatlabJsonlImporter().parse(src_path)
 
 
 def clean_text(text: str) -> str:
@@ -164,11 +160,38 @@ def build_db(db_path: Path, schema_path: Path = SCHEMA, no_reset: bool = False) 
     return conn
 
 
+def _resolve_importer(source: Path, importer):
+    """v0.2 O-5a: 显式 importer 优先；否则 registry auto_detect；
+    未命中回退 chatlab/WeFlow 解析并提示（保持 v0.1 可用性）。"""
+    if importer is not None:
+        return importer
+    try:
+        from importers.registry import auto_detect
+    except ImportError:
+        from importers.chatlab_jsonl import ChatlabJsonlImporter
+        return ChatlabJsonlImporter()
+    imp = auto_detect(source)
+    if imp is None:
+        from importers.chatlab_jsonl import ChatlabJsonlImporter
+        print(f"[warn] 未自动识别源格式，回退 chatlab/WeFlow JSONL 解析: {Path(source).name}")
+        imp = ChatlabJsonlImporter()
+    else:
+        print(f"[i] 识别源格式: {imp.source_name}")
+    return imp
+
+
 def ingest(source: Path, sender_map: dict[str, str], db_path: Path,
-           session_gap_s: int = SESSION_GAP_S, no_reset: bool = False) -> dict:
-    """完整导入流水线：解析 → 脱敏 → 会话化 → 入库 → 门禁 → 报告。返回摘要 dict。"""
-    raw = load_raw(source)
-    print(f"[1] 读取源消息: {len(raw)} 条")
+           session_gap_s: int = SESSION_GAP_S, no_reset: bool = False,
+           importer=None) -> dict:
+    """完整导入流水线：解析 → 脱敏 → 会话化 → 入库 → 门禁 → 报告。返回摘要 dict。
+
+    importer: v0.2 可选，Importer 实例（见 importers/base.py）。缺省时按
+    registry 自动探测格式，未命中回退 chatlab。既有调用（run.py /
+    import_chat.py）零改动；返回 dict 结构不变。
+    """
+    imp = _resolve_importer(source, importer)
+    raw = imp.parse(source)
+    print(f"[1] 读取源消息: {len(raw)} 条（格式: {getattr(imp, 'source_name', '?')}）")
     if not raw:
         raise SystemExit("源文件里没有消息（_type=message）——请确认导出格式（docs/IMPORT.md）")
 

@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import config as cfg_mod                      # noqa: E402
+from importers import registry                 # noqa: E402
 from phase1_ingest import ingest              # noqa: E402
 
 
@@ -38,19 +39,41 @@ def sender_map_from(args) -> dict[str, str]:
     return m
 
 
+def pick_importer(args, src: Path):
+    """v0.2 O-5a: --format auto（默认）时按注册表自动探测，未命中回退 chatlab
+    并参考 config chat.format；显式格式强制指定 importer。"""
+    if args.format != "auto":
+        imp = registry.by_name(args.format)
+        if imp is None:
+            raise SystemExit(f"未知导入格式: {args.format}（可选: {', '.join(registry.names())}）")
+        return imp
+    imp = registry.auto_detect(src)
+    if imp is not None:
+        print(f"[i] 自动识别源格式: {imp.source_name}")
+        return imp
+    fmt = cfg_mod.load()["chat"]["format"]
+    imp = registry.by_name(fmt)
+    if imp is None:
+        from importers.chatlab_jsonl import ChatlabJsonlImporter
+        imp = ChatlabJsonlImporter()
+    print(f"[warn] 未自动识别源格式，按 chat.format={imp.source_name} 回退解析")
+    return imp
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="导入聊天记录 JSONL → IfWe 规范库")
+    ap = argparse.ArgumentParser(description="导入你自己导出的聊天记录 → IfWe 规范库")
     ap.add_argument("--source", type=str, default="",
-                    help="chatlab/WeFlow 导出的 JSONL 路径（默认取 config chat.source）")
+                    help="导出的聊天记录文件路径（默认取 config chat.source）")
+    ap.add_argument("--format", type=str, default="auto",
+                    choices=["auto"] + registry.names(),
+                    help="源格式：auto=自动探测（默认）；chatlab=WeFlow JSONL；"
+                         "wecomsg=WeChatMsg(MemoTrace) 导出；telegram=Telegram Desktop 导出 JSON")
     ap.add_argument("--sender-a", type=str, default="", help="你本人的原始账号名 → A")
     ap.add_argument("--sender-b", type=str, default="", help="对方的原始账号名 → B")
     ap.add_argument("--no-reset", action="store_true", help="复用已有库（默认全量重建）")
     args = ap.parse_args()
 
     cfg = cfg_mod.load()
-    if cfg["chat"]["format"] != "chatlab":
-        raise SystemExit(f"v1 仅支持 chatlab(WeFlow) 格式（当前 chat.format={cfg['chat']['format']}）；"
-                         "其他格式在路线图")
     if cfg["chat"]["timezone"] != "Asia/Shanghai":
         print("[warn] v1 导入固定按东八区(Asia/Shanghai)解析时间戳；其他时区字段预留未生效")
     if cfg["privacy"]["sanitize"] != "medium":
@@ -65,9 +88,10 @@ def main() -> int:
     smap = sender_map_from(args)
     print(f"[i] 源文件: {src}")
     print(f"[i] 账号名映射: {smap}（库内只存 A/B 代号，sender_orig 仅本地保留）")
+    imp = pick_importer(args, src)
     summary = ingest(src, smap, db_path=cfg_mod.db_path(),
                      session_gap_s=int(cfg["chat"]["session_gap_minutes"]) * 60,
-                     no_reset=args.no_reset)
+                     no_reset=args.no_reset, importer=imp)
     print("\n导入完成。下一步: python run.py analyze（生成事件/记忆/关系状态/人格）")
     return 0 if summary.get("gates_all_pass") else 1
 
