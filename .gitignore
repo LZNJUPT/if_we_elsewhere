@@ -14,3 +14,6 @@ venv/
 poc/.cache_fastembed/
 poc/data/
 *.log
+
+# AI 工作台本地目录（平台注入的本地状态，永不入库）
+.workbuddy/
