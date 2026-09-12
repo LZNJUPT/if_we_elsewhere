@@ -4,7 +4,7 @@ IfWe Phase 6 · Relationship Engine v1 核心模块（本地，不依赖 LLM）
 蓝图: docs/ARCHITECTURE.md（三元结构：R 稳态基线 / R 动态事件驱动 / R 快照序列）
       + §12（关系状态=双 Agent 共享对象）+ Phase5 启发式升级
 口径:
-  - R 稳态基线: 真实 44 期月度快照的缓慢变化基线（EWMA），来自 facts(memory_type=state, source=relationship_state)
+  - R 稳态基线: 真实历史各期月度快照的缓慢变化基线（EWMA），来自 facts(memory_type=state, source=relationship_state)
   - R 动态: 12 类事件 × (delta 近端, decay/echo) → 月粒度净增量（tanh 压缩）+ 断联零互动负漂移
   - R 快照序列: 每个 period/day 的 engine_state 落独立 rel_engine_state 表（R3 只读+独立表，不碰主库真值）
   - M7 校准系数: closeness×1.25 / trust×1.20 / emotional_safety×1.25 / comm_quality×1.15 / conflict×0.85
@@ -92,7 +92,7 @@ def _compress(x: float, gain: float = COMPRESS_GAIN) -> float:
 
 
 def load_real_states(conn) -> dict[str, dict]:
-    """真实 44 期（calibrated 真值，只读）"""
+    """真实历史各期（calibrated 真值，只读）"""
     rows = conn.execute(
         "SELECT period, closeness, conflict, trust, emotional_safety, comm_quality, confidence "
         "FROM relationship_state ORDER BY period").fetchall()

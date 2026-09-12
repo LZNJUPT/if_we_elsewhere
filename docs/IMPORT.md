@@ -89,7 +89,7 @@ python run.py analyze
 
 ```yaml
 media:
-  emojis_dir: "D:/weflow/Emojis"   # 示例：指向你导出的 Emojis 文件夹
+  emojis_dir: "path/to/weflow_emojis"   # 示例：指向你导出的 Emojis 文件夹
 ```
 
 要求：文件名为 32 位十六进制 + 图片扩展名（WeFlow 导出即如此）。

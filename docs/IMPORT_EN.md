@@ -91,7 +91,7 @@ Point `media.emojis_dir` at your exported sticker folder:
 
 ```yaml
 media:
-  emojis_dir: "D:/weflow/Emojis"
+  emojis_dir: "path/to/weflow_emojis"
 ```
 
 Filenames must be 32 hex chars + an image extension (as WeFlow exports).

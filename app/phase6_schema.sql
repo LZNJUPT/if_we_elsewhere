@@ -1,7 +1,7 @@
 -- IfWe Phase 6 Relationship Engine v1 扩展 schema（只加表，不破 v1 / Phase2/4/5 已有表）
 -- 蓝图: 《IfWe技术调研报告-第一轮.md》§9 三元结构 + §16 Phase 6
 -- 约定（R3 用户拍板: 只读+独立结果表）:
---   - 主库 relationship_state 44 期 calibrated 真值【只读不写】
+--   - 主库 relationship_state 历史各期 calibrated 真值【只读不写】
 --   - 引擎产出的快照/预测/贡献一律落本文件新表（rel_engine_*），可随时删除重建
 --   - 续演分支的引擎状态仍写 sim_rel_state（method='engine'），不并入主库
 -- 应用方式: phase6 各脚本幂等执行 under project root
@@ -10,7 +10,7 @@
 CREATE TABLE IF NOT EXISTS rel_engine_runs (
     run_id          TEXT PRIMARY KEY,       -- main-replay / sim-replay-{sim_id} / eval-one-step
     scope           TEXT NOT NULL,          -- main / sim / eval
-    label           TEXT,                   -- 可读标签（如 主库44期回放）
+    label           TEXT,                   -- 可读标签（如 主库历史回放）
     method          TEXT DEFAULT 'engine_v1',
     source_baseline TEXT,                   -- steady 基线来源说明
     config_json     TEXT,                   -- 超参数快照（echo_decay/alpha/compress…）
