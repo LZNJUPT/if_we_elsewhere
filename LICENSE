@@ -1,0 +1,50 @@
+MIT License
+
+Copyright (c) 2026 The IfWe Authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------------------------
+
+## 附加条款（Additional Terms）
+
+在上述 MIT 许可证之外，使用本软件还须遵守以下附加条款。这些条款不与 MIT
+冲突，仅施加额外限制（MIT 允许此类附加条款）：
+
+1. **禁止滥用**：禁止将本软件或其衍生作品用于跟踪、骚扰、监控、恐吓或以其他
+   方式侵害真实他人的合法权益。
+2. **数据合法性**：使用者须保证导入本软件的聊天记录等数据的取得与使用符合
+   其所在司法辖区的法律，以及数据所涉各方的合法权益。
+3. **生成内容性质**：本软件生成的任何内容均为模型推演产物，不代表任何真实
+   人物的意愿或立场，不得作为心理、医疗、法律建议使用，亦不得冒充真实他人
+   进行对外沟通。
+
+Additional terms (in English):
+
+In addition to the MIT License above, the following additional terms apply:
+
+1. **No abuse**: You may not use this software or derivatives to track,
+   harass, monitor, intimidate, or otherwise harm real people.
+2. **Lawful data**: You are responsible for ensuring that any chat logs or
+   other data you import are obtained and used in compliance with applicable
+   law and the rights of everyone involved.
+3. **Nature of generated content**: All generated content is model
+   speculation. It does not represent any real person's will, must not be
+   treated as psychological, medical or legal advice, and must not be used to
+   impersonate a real person in external communication.

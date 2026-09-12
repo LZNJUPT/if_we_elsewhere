@@ -1,0 +1,16 @@
+# 用户数据与产物（绝不入库）
+data/
+data_demo/
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 本地工具缓存
+poc/.cache_fastembed/
+poc/data/
+*.log

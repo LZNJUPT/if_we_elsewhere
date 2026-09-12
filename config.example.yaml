@@ -1,0 +1,38 @@
+# IfWe 配置模板 —— 复制为 config.yaml 后按需修改
+# 所有字段都有默认值：不创建 config.yaml 也能跑 demo；导入真实数据前至少填 chat.source
+# 密钥永远不写进本文件，只放环境变量（见 llm.api_key_env）
+
+people:
+  A: { key: "A", display: "你", name: "", match: "" }    # 用户本人；display 用于界面与提示词；match = 导出文件里的原始账号名
+  B: { key: "B", display: "TA", name: "", match: "" }   # 数字人格一侧；match 留空时用 import_chat.py 的 CLI 参数指定
+
+chat:
+  source: "data/raw/chat.jsonl"   # 你自己导出的聊天记录（chatlab/WeFlow JSONL）
+  format: "chatlab"               # v1 仅支持 chatlab(WeFlow)；wechatmsg 在路线图
+  timezone: "Asia/Shanghai"
+  session_gap_minutes: 30         # 相邻消息超过该间隔视为两个会话
+
+llm:
+  provider: "deepseek"            # deepseek | 任意 OpenAI 兼容端点
+  model: "deepseek-chat"
+  api_key_env: "LLM_API_KEY"      # 只从环境变量读密钥；兼容旧名 DEEPSEEK_API_KEY
+  base_url: "https://api.deepseek.com"
+  max_tokens: 8192
+
+media:
+  emojis_dir: ""                  # 表情包目录（WeFlow 导出的 Emojis 文件夹路径）；留空则界面显示占位符
+
+privacy:
+  sanitize: "medium"              # 导入脱敏档位（v1 固定 medium）
+  allow_llm_send: true            # 显式确认后才会把脱敏文本发送给你配置的 LLM API
+
+defaults:
+  start_after_last: true          # 「接着往下聊」默认从最后一条消息的次日继续
+  auto_day_turns: 20              # 累计消息数达到该值自然跨天
+  seed: 42                        # 模拟时钟随机种子（可复现）
+  port: 8015                      # 本地服务端口（只监听 127.0.0.1）
+
+paths:                            # 一般不用改；相对路径相对项目根
+  data_dir: "data"
+  persona_dir: ""                 # 留空 = data_dir/persona
+  cache_dir: ""                   # 留空 = data_dir/cache

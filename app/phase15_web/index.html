@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IfWe · 对话推演</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="side">
+    <div class="side-head">
+      <div class="brand">IfWe<small>对话推演</small></div>
+      <button class="btn btn-sm btn-primary" id="btnNew">＋ 新的一条线</button>
+    </div>
+    <div class="lines" id="lines"><div class="empty">还没有任何线。<br>点右上角开一条。</div></div>
+    <div class="rel-panel">
+      <div class="rel-head" id="relHead">
+        <span>关系状态</span><span id="relToggle">展开 ▾</span>
+      </div>
+      <div class="rel-body" id="relBody"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main-head">
+      <h1 id="mTitle">—</h1>
+      <span class="chip" id="mDay">—</span>
+      <span class="chip gray" id="mMsg">—</span>
+      <div class="spacer"></div>
+      <button class="btn btn-sm" id="btnHist" title="显示 / 隐藏这条线开始之前的真实聊天记录">真实记录</button>
+      <button class="btn btn-sm" id="btnDay">推进一天 →</button>
+    </div>
+    <div class="chat" id="chat"></div>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送 · Shift+Enter 换行）"></textarea>
+      <button class="btn btn-primary" id="btnSend">发送</button>
+    </div>
+  </main>
+</div>
+
+<div class="modal" id="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>开一条新线</h2>
+      <button class="btn btn-sm" id="btnClose">关闭</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-pane="now">接着往下聊</button>
+      <button class="tab" data-pane="past">回到过去某一天</button>
+    </div>
+
+    <div class="pane active" id="pane-now">
+      <div class="tl-wrap">
+        <div class="snap" id="nowInfo">加载中…</div>
+      </div>
+      <div class="form">
+        <div class="form-row">
+          <label>起始日期</label>
+          <input name="date-now" type="date">
+          <label>这条线叫</label>
+          <input name="name-now" type="text" placeholder="例如：继续聊">
+        </div>
+        <div class="form-row">
+          <span class="hint" style="text-align:left;padding:0">对方会记得你们之间所有真实发生过的事。</span>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="btnCreateNow">开始聊天</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane" id="pane-past">
+      <div class="tl-summary" id="tlSummary">加载中…</div>
+      <div class="tl-legend">
+        <span class="tl-b warn">断联</span><span class="tl-b info">情绪拐点</span>
+        <span class="tl-b ok">活跃高峰</span><span class="tl-b plain">重要事件</span>
+        <span class="tl-b dp">岔路口</span>
+        <span class="spacer"></span>
+        <span>点一个月份选时间</span>
+      </div>
+      <div class="tl-wrap" id="tl"></div>
+      <div class="form">
+        <div class="snap" id="pastInfo">还没选日期。上面点一个月份。</div>
+        <div class="recall" id="pastRecall"></div>
+        <div class="form-row">
+          <label>从这天开始</label>
+          <input name="date-past" type="date">
+        </div>
+        <textarea name="rewrite" placeholder="这次你想怎么做？（留空＝只是从那天重新聊起）&#10;例如：那天我没有只回一个『嗯』，我直接打了电话过去"></textarea>
+        <div class="form-row">
+          <label>这条线叫</label>
+          <input name="name-past" type="text" placeholder="例如：如果那天我打了电话">
+          <button class="btn btn-primary" id="btnCreatePast">开一条新线</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>
