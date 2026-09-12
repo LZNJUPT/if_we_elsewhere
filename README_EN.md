@@ -59,7 +59,7 @@ the model, seriously and completely — once more.**
 
 IfWe is a **local-first** relationship timeline tool:
 
-1. **Import** your chat history with someone important (a JSONL file you lawfully exported yourself);
+1. **Import** your chat history with someone important (a file you lawfully exported yourself: WeFlow / WeChatMsg / Telegram official exports are supported);
 2. The system sanitizes, extracts events, builds memories and estimates relationship
    state — all locally;
 3. Pick a "fork point" on the timeline — one sentence you did or didn't say that day —
@@ -165,7 +165,7 @@ endpoint works (DeepSeek / GLM / local inference).
 
 ## Roadmap
 
-- [ ] v0.2 more import formats (WeChatMsg etc.)
+- [x] v0.2 more import formats (WeChatMsg, Telegram, import doctor, web wizard)
 - [ ] v0.3 research-metric scripts (sensitivity / scoring / evaluation — out of v0.1 scope)
 - [ ] Web form editor for persona files
 - [ ] Relationship-state visualization panel (productized research module)

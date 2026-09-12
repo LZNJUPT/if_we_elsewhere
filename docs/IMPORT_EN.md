@@ -11,7 +11,22 @@
   The sanitized text (`content_clean`) is the only input for later analysis
   and LLM calls.
 
-## Format supported in v1: chatlab JSONL (WeFlow export)
+## Where data comes from (v0.2)
+
+IfWe **only consumes chat log files you lawfully exported yourself** and never
+parses any messaging app's database. Supported export sources:
+
+| Format ID | Source tool (official repo/docs) | Export artifact | Notes |
+|---|---|---|---|
+| `chatlab` | [WeFlow](https://github.com/hicccc77/WeFlow) | JSONL | IfWe's native format, best supported |
+| `wecomsg` | [WeChatMsg / MemoTrace](https://github.com/LC044/WeChatMsg) | CSV | messages without a canonical type (voice, video, system notices…) are skipped and counted |
+| `telegram` | [Telegram Desktop](https://telegram.org/blog/export-and-more) official export | Machine-readable JSON (`result.json`) | official feature, no compliance disputes |
+
+> Links are source pointers only — **not tutorials**. Perform exports inside
+> each tool's official documentation. Group chats are not supported: import
+> one-on-one conversations only.
+
+## Format 1: chatlab JSONL (WeFlow export, native)
 
 One JSON object per line:
 
@@ -23,26 +38,59 @@ One JSON object per line:
 | Field | Meaning |
 |---|---|
 | `_type` | must be `"message"` (other lines are skipped) |
-| `timestamp` | Unix epoch seconds |
+| `timestamp` | Unix epoch seconds (v0.2 also accepts milliseconds / ISO8601 / aliases `ts`/`time`) |
 | `type` | `0` text / `7` image or sticker / `4` file / `23` call / `24` mini-program / `25` quoted text / `27` name card / `80` recall / `99` transfer |
-| `content` | content (sticker: filename; transfer: text with amount) |
-| `accountName` | sender handle — mapped to A/B via `--sender-a/--sender-b` |
+| `content` | content (sticker: filename; transfer: text with amount; aliases `text`/`message`) |
+| `accountName` | sender handle — mapped to A/B via `--sender-a/--sender-b` (aliases `sender`/`talker`/`nick`) |
 
-> Exports from WeFlow (a local WeChat-export tool) match this format.
-> Compatibility with other tools (e.g. WeChatMsg) is on the roadmap (v0.2).
+## Format 2: WeChatMsg (MemoTrace) CSV export
+
+Export "chat history → CSV" (current stable `id,MsgSvrID,type_name,is_sender,
+talker,room_name,msg,src,CreateTime` columns; the legacy combined `content`
+column is also supported). Text/image/sticker/file/call/quote/name card/
+transfer/recall are imported; voice, video, system notices and other messages
+without a canonical type are **skipped and counted** (no guessing); group-chat
+rows are skipped. Handles are usually wxids — confirm via the doctor report or
+the web preview candidate list before mapping.
+
+## Format 3: Telegram Desktop official JSON export
+
+Telegram Desktop → Settings → Advanced → Export chat history →
+Machine-readable JSON (`result.json`). Text (including mixed-array entity
+concatenation), photos, stickers and files are imported; voice messages, edit
+events and service rows are skipped and counted; rows beyond two senders are
+treated as group chatter and skipped. Timestamps with an offset are parsed with
+their own offset; naive timestamps are read as UTC+8 (matching the project's
+v1 convention).
+
+## Import doctor (read-only preflight)
+
+Not sure whether a file can be imported? Run the read-only check:
+
+```bash
+python run.py doctor --source your_export.csv
+```
+
+It reports: detected format, valid message count, time span, candidate handles
+with share, message-type distribution, estimated privacy-pattern hits, and a
+verdict (importable / what's missing / suggested flags). Unrecognized files
+produce a reason list instead of a crash.
 
 ## Steps
 
 ```bash
-# Option A: one shot
+# Option A: one shot (--format defaults to auto-detection)
 python run.py init --source data/raw/chat.jsonl \
     --sender-a "your_handle" --sender-b "their_handle"
 
 # Option B: step by step
 python run.py init
-python scripts/import_chat.py --source data/raw/chat.jsonl \
+python scripts/import_chat.py --source data/raw/chat.csv \
+    --format wecomsg \
     --sender-a "your_handle" --sender-b "their_handle"
 ```
+
+`--format` accepts `auto` (default) / `chatlab` / `wecomsg` / `telegram`.
 
 You can also put the mapping in `config.yaml` and skip the CLI flags:
 
@@ -56,7 +104,23 @@ chat:
 
 > Convention: `--sender-a` is **you** (the "you" of the conversation; you type
 > the messages yourself during replays), `--sender-b` is the other person (the
-> digital persona side). Handles must match `accountName` exactly.
+> digital persona side). Handles must match the sender field exactly
+> (WeChatMsg usually a wxid; Telegram a from_id).
+
+## Web import wizard
+
+Prefer not to use the CLI? Start the local UI (`python run.py server`) and
+open "**Import**" in the left sidebar:
+
+1. **Upload**: drag & drop or pick a `.jsonl / .json / .csv` file (≤50MB);
+2. **Preview**: format, time span, type distribution, privacy estimate +
+   **A/B dropdowns** (candidate handles with counts and sanitized samples);
+3. **Result**: quality-gate summary (ordering / both-party ratio / residue /
+   unknown senders).
+
+Uploaded files live in a local temp directory (`data/tmp_import/`) and are
+deleted as soon as the import chain ends (including failures); nothing ever
+leaves your machine. See [../PRIVACY_EN.md](../PRIVACY_EN.md).
 
 ## What happens after import
 

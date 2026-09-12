@@ -42,7 +42,26 @@
 | Simulation isolation | Replays write to `sim_*` tables; the main DB gets zero writes during a replay (verified automatically by the offline selftest) |
 | Counterfactual freeze | After a branch's fork point, real memories are time-truncated, so the model cannot see the future you rewrote |
 | Keys | Read from environment variables only (default `LLM_API_KEY`), never written to disk or the repo |
+| Web import | Uploaded files land only in the local temp directory `data/tmp_import/`; the upload → preview → commit chain **deletes them immediately when it ends** (including failures); preview returns statistics and sanitized samples only — never raw text or server paths |
 | Repo hygiene | `data/` and `config.yaml` are always gitignored; sample data is purely fictional |
+
+## Web import wizard data flow (v0.2)
+
+The "Import" entry in the left sidebar uses the same local pipeline as the CLI:
+
+1. **Upload**: the file is written to a local directory `data/tmp_import/<random-id>`
+   (inside `data/`, already gitignored); only `.jsonl / .json / .csv` are
+   accepted, up to 50MB, one import task at a time (file lock);
+2. **Preview**: format detection, statistics and sanitized samples are computed
+   locally; the response contains statistics and up to 3 **sanitized** samples
+   per side — no raw text, no server paths;
+3. **Commit**: the full import + quality gates run in the same process;
+4. **Deletion**: after a failed preview or whenever the commit ends (success or
+   failure), the temp file and lock are **deleted immediately**; tasks older
+   than 1 hour are reclaimed automatically.
+
+Everything happens on your computer; this project has no server and performs
+no remote uploads.
 
 ## The privacy gate (this project's own bar)
 

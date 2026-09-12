@@ -12,7 +12,10 @@
   <aside class="side">
     <div class="side-head">
       <div class="brand">IfWe<small>对话推演</small></div>
-      <button class="btn btn-sm btn-primary" id="btnNew">＋ 新的一条线</button>
+      <div class="side-btns">
+        <button class="btn btn-sm" id="btnImport" title="导入聊天记录（本地，不上传任何远端）">导入记录</button>
+        <button class="btn btn-sm btn-primary" id="btnNew">＋ 新的一条线</button>
+      </div>
     </div>
     <div class="lines" id="lines"><div class="empty">还没有任何线。<br>点右上角开一条。</div></div>
     <div class="rel-panel">
@@ -92,6 +95,69 @@
           <label>这条线叫</label>
           <input name="name-past" type="text" placeholder="例如：如果那天我打了电话">
           <button class="btn btn-primary" id="btnCreatePast">开一条新线</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="impModal">
+  <div class="modal-card imp-card">
+    <div class="modal-head">
+      <h2>导入聊天记录</h2>
+      <button class="btn btn-sm" id="impClose">关闭</button>
+    </div>
+    <div class="imp-steps">
+      <span id="impS1" class="on">① 上传</span>
+      <span id="impS2">② 预览确认</span>
+      <span id="impS3">③ 导入结果</span>
+    </div>
+
+    <div class="pane active imp-pane" id="imp-pane1">
+      <div class="imp-drop" id="impDrop">
+        <b>拖拽文件到这里，或点击选择</b>
+        <span>支持 .jsonl / .json / .csv，≤ 50MB</span>
+        <span class="imp-sub">全程本机处理，文件不会被上传到任何远端</span>
+      </div>
+      <input type="file" id="impFile" accept=".jsonl,.json,.csv" hidden>
+      <div class="imp-formats">
+        <b>支持从这些工具的导出文件导入：</b>
+        <ul>
+          <li>chatlab / WeFlow 导出的 JSONL</li>
+          <li>WeChatMsg（MemoTrace / 留痕）导出的 CSV</li>
+          <li>Telegram Desktop 导出的 result.json（Machine-readable JSON）</li>
+        </ul>
+        <span>只支持「你自己合法导出」的文件；本项目不解析任何聊天软件的数据库。</span>
+      </div>
+    </div>
+
+    <div class="pane imp-pane" id="imp-pane2">
+      <div class="imp-body" id="impReport">分析中…</div>
+      <div class="form imp-form">
+        <div class="form-row" id="impPickRow">
+          <label>你（A）</label><select id="impSelA"></select>
+          <label>对方（B）</label><select id="impSelB"></select>
+        </div>
+        <div class="form-row">
+          <label>会话切分阈值</label>
+          <input id="impGap" type="number" min="1" max="1440" value="30" style="width:80px"> <span class="imp-sub">分钟</span>
+        </div>
+        <div class="snap">⚠ 导入会全量重建数据库：现有的推演线与分析产物会被清空（persona 文件保留）。</div>
+        <div class="form-row">
+          <button class="btn" id="impBack">← 重新上传</button>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="impCommit">确认导入</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane imp-pane" id="imp-pane3">
+      <div class="imp-body" id="impResult">导入中…</div>
+      <div class="form">
+        <div class="form-row">
+          <button class="btn" id="impAgain">再导一份</button>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="impDone">完成</button>
         </div>
       </div>
     </div>

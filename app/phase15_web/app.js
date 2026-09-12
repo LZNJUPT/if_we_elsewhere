@@ -447,6 +447,184 @@ async function createLine(start, name, rewrite) {
   } catch (e) { toast("创建失败：" + e.message); }
 }
 
+/* ---------------------------------------------------------------- 导入向导（v0.2 O-5f） */
+const IMP = { id: null, report: null, candidates: [], busy: false };
+
+function impStep(n) {
+  for (let i = 1; i <= 3; i++) {
+    $(`#imp-pane${i}`).classList.toggle("active", i === n);
+    const s = $(`#impS${i}`);
+    s.classList.toggle("on", i === n);
+    s.classList.toggle("done", i < n);
+  }
+}
+
+function openImport() {
+  IMP.id = null; IMP.report = null; IMP.candidates = [];
+  $("#impModal").classList.add("open");
+  impStep(1);
+}
+
+function closeImport() { $("#impModal").classList.remove("open"); }
+
+function impResetToUpload() { IMP.id = null; impStep(1); }
+
+async function impUpload(file) {
+  if (IMP.busy) return;
+  IMP.busy = true;
+  $("#impDrop").querySelector("b").textContent = `上传中：${file.name} …`;
+  try {
+    const r = await fetch("/api/import/upload?filename=" + encodeURIComponent(file.name),
+      { method: "POST", body: file });
+    if (!r.ok) {
+      let d = ""; try { d = (await r.json()).detail || ""; } catch (e) { }
+      throw new Error(d || ("HTTP " + r.status));
+    }
+    const d = await r.json();
+    IMP.id = d.import_id;
+    await impPreview();
+  } catch (e) {
+    toast("上传失败：" + e.message);
+    $("#impDrop").querySelector("b").textContent = "拖拽文件到这里，或点击选择";
+  } finally { IMP.busy = false; }
+}
+
+async function impPreview() {
+  if (!IMP.id) return;
+  IMP.busy = true;
+  impStep(2);
+  $("#impReport").innerHTML = "分析中…";
+  try {
+    const d = await api("/api/import/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ import_id: IMP.id }),
+    });
+    IMP.report = d.report;
+    IMP.candidates = d.candidates || [];
+    renderImpReport(d);
+  } catch (e) {
+    $("#impReport").innerHTML = `<h3 class="bad">预览失败</h3><div>${esc(e.message)}</div>`;
+    toast("预览失败：" + e.message);
+  } finally { IMP.busy = false; }
+}
+
+function renderImpReport(d) {
+  const r = d.report;
+  const ok = !!r.importable;
+  let h = `<h3 class="${ok ? "ok" : "bad"}">${ok ? "✓ " : "✕ "}${esc(r.verdict || "无法识别格式")}</h3>`;
+  if (!r.recognized) {
+    h += `<div>这个文件我们认不出来。可能的原因：</div>
+          <ul>${(r.reasons || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+          <div>可尝试的格式与来源见第一步的说明。</div>`;
+    $("#impReport").innerHTML = h;
+    $("#impCommit").disabled = true;
+    $("#impPickRow").style.display = "none";
+    return;
+  }
+  const kv = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+  h += `<div class="imp-kv">`;
+  h += kv("格式", esc(r.importer) + (r.source_encoding ? `（${esc(r.source_encoding)}）` : ""));
+  h += kv("消息数", `${r.message_count} 条有效 / 共 ${r.total_rows} 行`);
+  if (r.time_span) h += kv("时间跨度", `${esc(r.time_span.first)} → ${esc(r.time_span.last)}（${r.time_span.days} 天 / ${r.time_span.active_days} 个有消息日）`);
+  h += kv("消息类型", Object.entries(r.type_dist || {}).map(([k, v]) => esc(k) + "×" + v).join("，") || "—");
+  if (r.skipped && Object.keys(r.skipped).length)
+    h += kv("跳过", Object.entries(r.skipped).map(([k, v]) => esc(k.replace("skipped_", "")) + "×" + v).join("，"));
+  const pe = r.privacy_estimate;
+  if (pe) h += kv("脱敏预估", `${pe.messages_with_hits} 条命中隐私模式` +
+    (Object.keys(pe.by_category || {}).length
+      ? "（" + Object.entries(pe.by_category).map(([k, v]) => esc(k) + "×" + v).join("，") + "）" : ""));
+  h += `</div>`;
+  if (r.reasons && r.reasons.length)
+    h += `<div class="imp-tags">${r.reasons.map(x => `<span class="imp-tag warn">${esc(x)}</span>`).join("")}</div>`;
+
+  // A/B 候选 + 样例
+  if (IMP.candidates.length) {
+    $("#impSelA").innerHTML = IMP.candidates.map(c =>
+      `<option value="${esc(c.account)}">${esc(c.account)}（${c.count} 条，${c.pct}%）</option>`).join("");
+    $("#impSelB").innerHTML = $("#impSelA").innerHTML;
+    $("#impSelA").selectedIndex = 0;
+    $("#impSelB").selectedIndex = Math.min(1, IMP.candidates.length - 1);
+    h += IMP.candidates.slice(0, 4).map(c =>
+      `<div class="imp-cand"><b>${esc(c.account)}</b>　${c.count} 条（${c.pct}%）` +
+      (c.samples || []).map(s => `<div class="sample">${esc(s.text)}</div>`).join("") +
+      `</div>`).join("");
+    $("#impPickRow").style.display = IMP.candidates.length >= 2 ? "flex" : "none";
+    $("#impCommit").disabled = !(ok && IMP.candidates.length >= 2);
+    if (IMP.candidates.length < 2)
+      h += `<div class="imp-tag warn">候选账号不足 2 个——双人对话才可导入，请检查导出范围</div>`;
+  } else {
+    $("#impPickRow").style.display = "none";
+    $("#impCommit").disabled = true;
+  }
+  $("#impReport").innerHTML = h;
+}
+
+async function impCommit() {
+  if (IMP.busy || !IMP.id) return;
+  const a = $("#impSelA").value, b = $("#impSelB").value;
+  if (!a || !b || a === b) return toast("请选择两个不同的账号分别作为你（A）与对方（B）");
+  const gap = parseInt($("#impGap").value, 10);
+  IMP.busy = true;
+  $("#impCommit").disabled = true;
+  impStep(3);
+  $("#impResult").innerHTML = "导入中…（脱敏 → 会话化 → 入库 → 质量门禁）";
+  try {
+    const d = await api("/api/import/commit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ import_id: IMP.id, sender_a: a, sender_b: b,
+        session_gap_minutes: isNaN(gap) ? null : gap }),
+    });
+    renderImpResult(d.summary);
+    toast("导入完成");
+  } catch (e) {
+    $("#impResult").innerHTML =
+      `<h3 class="bad">✕ 导入失败</h3><div>${esc(e.message)}</div>` +
+      `<div style="margin-top:8px">临时文件已清理，可点击「再导一份」重新开始。</div>`;
+  } finally {
+    IMP.busy = false;
+    $("#impCommit").disabled = false;
+  }
+}
+
+function renderImpResult(s) {
+  const ok = !!s.gates_all_pass;
+  const gates = s.gates || {};
+  const gname = { G2_时间序列有序: "时间序列有序", G3_双人占比: "双人占比",
+    G4_长断档告警: "长断档告警（不阻塞）", G5_脱敏残留: "脱敏残留", G7_未知发送者/类型: "未知发送者/类型" };
+  $("#impResult").innerHTML =
+    `<h3 class="${ok ? "ok" : "bad"}">${ok ? "✓ 导入完成，全部门禁通过" : "导入完成，但存在未通过的门禁"}</h3>
+     <div class="imp-kv">
+       <div class="k">消息数</div><div class="v">${s.message_count} 条 / ${s.session_count} 个会话</div>
+       <div class="k">时间跨度</div><div class="v">${esc(s.first_day)} → ${esc(s.last_day)}（${s.active_days} 个有消息日）</div>
+       <div class="k">内容字数</div><div class="v">${s.char_count_total}</div>
+     </div>
+     <div class="imp-gates">` +
+    Object.entries(gates).map(([k, v]) =>
+      `<div class="imp-gate${v ? "" : " bad"}"><span class="${v ? "g-ok" : "g-bad"}">${v ? "✓" : "✕"}</span>${esc(gname[k] || k)}</div>`).join("") +
+    `</div>
+     <div style="margin-top:10px">下一步：关闭本窗口后运行分析（<b>python run.py analyze</b> 或重启时自动），即可开始对话推演。</div>`;
+}
+
+/* 向导事件绑定 */
+$("#btnImport").onclick = openImport;
+$("#impClose").onclick = closeImport;
+$("#impModal").onclick = e => { if (e.target.id === "impModal") closeImport(); };
+$("#impBack").onclick = impResetToUpload;
+$("#impAgain").onclick = impResetToUpload;
+$("#impDone").onclick = closeImport;
+$("#impCommit").onclick = impCommit;
+$("#impDrop").onclick = () => $("#impFile").click();
+$("#impFile").onchange = e => { const f = e.target.files[0]; if (f) impUpload(f); e.target.value = ""; };
+$("#impDrop").ondragover = e => { e.preventDefault(); $("#impDrop").classList.add("over"); };
+$("#impDrop").ondragleave = () => $("#impDrop").classList.remove("over");
+$("#impDrop").ondrop = e => {
+  e.preventDefault();
+  $("#impDrop").classList.remove("over");
+  const f = e.dataTransfer.files[0];
+  if (f) impUpload(f);
+};
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeImport(); });
+
 /* ---------------------------------------------------------------- 事件绑定 */
 $("#btnNew").onclick = openModal;
 $("#btnClose").onclick = closeModal;

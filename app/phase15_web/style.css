@@ -173,3 +173,48 @@ button{font:inherit}
 .recall-row .who{flex:0 0 30px;color:#9aa3b2}
 .recall-row.me .who{color:#93a8ca}
 .recall-row .tx{color:#4b5563;white-space:pre-wrap;word-break:break-word}
+
+/* ---------- 导入向导（v0.2 O-5f） ---------- */
+.side-btns{display:flex;gap:8px;flex:0 0 auto}
+.imp-card{max-width:640px}
+.imp-steps{display:flex;gap:8px;padding:14px 20px 0}
+.imp-steps span{flex:1;text-align:center;font-size:12.5px;font-weight:600;color:#9aa3b2;
+  background:#f1f3f7;border-radius:8px;padding:6px 4px}
+.imp-steps span.on{background:#eff4ff;color:var(--brand-dark)}
+.imp-steps span.done{background:#ecfdf5;color:#047857}
+.imp-pane{padding:16px 20px 20px;overflow-y:auto}
+.imp-drop{border:2px dashed #c7d2fe;border-radius:12px;background:#f8faff;min-height:150px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+  cursor:pointer;text-align:center;padding:18px;transition:background .12s,border-color .12s}
+.imp-drop:hover,.imp-drop.over{background:#eff4ff;border-color:var(--brand)}
+.imp-drop b{font-size:14.5px;color:var(--txt)}
+.imp-drop span{font-size:12.5px;color:var(--muted)}
+.imp-drop .imp-sub{font-size:11.5px;color:#9aa3b2}
+.imp-formats{margin-top:14px;font-size:12.5px;color:var(--muted);line-height:1.7}
+.imp-formats ul{margin:6px 0;padding-left:20px}
+.imp-formats b{color:var(--txt);font-size:12.5px}
+.imp-formats .imp-sub{font-size:11.5px;color:#9aa3b2}
+.imp-body{font-size:13px;line-height:1.8;color:#374151}
+.imp-body h3{margin:2px 0 8px;font-size:14px;color:var(--txt)}
+.imp-body h3.ok{color:var(--ok)}
+.imp-body h3.bad{color:var(--danger)}
+.imp-kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 14px;font-size:12.5px}
+.imp-kv .k{color:var(--muted);white-space:nowrap}
+.imp-kv .v{color:var(--txt);word-break:break-word}
+.imp-tags{display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 10px}
+.imp-tag{padding:1px 8px;border-radius:10px;font-size:11px;background:#f3f4f6;color:#4b5563}
+.imp-tag.warn{background:#fff7ed;color:#c2410c}
+.imp-cand{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:8px;background:#fbfcfe}
+.imp-cand .imp-sub{display:block;font-size:11.5px;color:#9aa3b2;margin-top:3px}
+.imp-cand .sample{font-size:12.5px;color:#4b5563;white-space:pre-wrap;word-break:break-word;
+  padding:3px 0 3px 10px;border-left:2px solid #e0e7ff;margin-top:4px}
+.imp-form{border-top:none;padding-top:0}
+.imp-form select{border:1px solid var(--line);border-radius:8px;padding:8px 11px;font:inherit;
+  outline:none;flex:1;min-width:150px;max-width:240px}
+.imp-form select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.imp-gates{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.imp-gate{display:flex;align-items:center;gap:8px;font-size:12.5px;
+  padding:6px 10px;border-radius:8px;background:#f8fafc;border:1px solid var(--line)}
+.imp-gate .g-ok{color:var(--ok);font-weight:700}
+.imp-gate .g-bad{color:var(--danger);font-weight:700}
+.imp-gate.bad{background:#fef2f2;border-color:#fecaca}

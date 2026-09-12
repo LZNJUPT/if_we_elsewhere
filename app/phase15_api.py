@@ -22,16 +22,21 @@ import os
 import re
 import sqlite3
 import threading
+import time
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config as cfg_mod
+import phase1_ingest as p1
 import phase4_retrieval
 import phase5_common as pc
+from doctor import run_doctor
+from importers import registry as importer_registry
 from phase15_dial_engine import (AUTO_DAY_TURNS, get_default_start, DialEngine,
                                  _dial_lines, new_line)
 from phase5_llm import get_client
@@ -413,6 +418,200 @@ def api_delete_line(sim_id: str):
         conn.commit()
         conn.close()
     return {"ok": True}
+
+
+# ================================================================ Web 导入向导（v0.2 O-5f）
+#
+# 生命周期：upload（落临时文件 + 取 .lock）→ preview（体检+A/B 候选+脱敏样例）
+#           → commit（完整 ingest+门禁）→ **链路结束（含异常路径）立即删除临时文件与锁**。
+# 安全：仅本机 127.0.0.1；响应不含服务器路径；预览只回统计 + 每方前 3 条脱敏样例；
+#       白名单扩展名 + ≤50MB + import_id 严格 hex 校验 + 同时仅一个导入任务。
+IMPORT_TMP_DIR = cfg_mod.data_dir() / "tmp_import"       # data/ 已 gitignore，绝不入库
+IMPORT_MAX_BYTES = 50 * 1024 * 1024
+IMPORT_ALLOWED_EXTS = {".jsonl", ".json", ".csv"}
+IMPORT_STALE_S = 3600                                    # 锁/临时文件过期回收阈值
+_import_mutex = threading.Lock()
+
+
+class ImportPreviewBody(BaseModel):
+    import_id: str
+
+
+class ImportCommitBody(BaseModel):
+    import_id: str
+    sender_a: str
+    sender_b: str
+    session_gap_minutes: int | None = None
+
+
+def _import_file(import_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", import_id or ""):
+        raise HTTPException(400, "非法 import_id")
+    if not IMPORT_TMP_DIR.is_dir():
+        raise HTTPException(404, "临时文件不存在（已过期或已完成）")
+    files = sorted(IMPORT_TMP_DIR.glob(import_id + ".*"))
+    if not files:
+        raise HTTPException(404, "临时文件不存在（已过期或已完成）")
+    return files[0]
+
+
+def _lock_read() -> dict | None:
+    try:
+        return json.loads((IMPORT_TMP_DIR / ".lock").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _lock_write(meta: dict) -> None:
+    (IMPORT_TMP_DIR / ".lock").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def _import_cleanup(import_id: str | None = None) -> None:
+    """逐文件 unlink（本机 safe-delete 对目录级删除 fail-closed，勿整目录删）。"""
+    try:
+        (IMPORT_TMP_DIR / ".lock").unlink()
+    except OSError:
+        pass
+    if import_id and IMPORT_TMP_DIR.is_dir():
+        for p in IMPORT_TMP_DIR.glob(import_id + ".*"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _purge_stale_import() -> None:
+    """回收超时锁与孤儿临时文件（客户端中途放弃的兜底）。"""
+    lockp = IMPORT_TMP_DIR / ".lock"
+    if lockp.exists():
+        age = time.time() - lockp.stat().st_mtime
+        if age > IMPORT_STALE_S:
+            _import_cleanup()
+    if IMPORT_TMP_DIR.is_dir():
+        for p in IMPORT_TMP_DIR.iterdir():
+            if p.name == ".lock":
+                continue
+            if time.time() - p.stat().st_mtime > IMPORT_STALE_S:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
+def _extract_upload(request: Request, body: bytes) -> tuple[bytes, str]:
+    """支持 multipart/form-data（手写解析，零新增依赖）与裸 octet-stream 两种上传。"""
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("multipart/"):
+        m = re.search(r'boundary="?([^";]+)"?', ctype)
+        if not m:
+            raise HTTPException(400, "multipart 缺少 boundary")
+        sep = b"--" + m.group(1).encode()
+        for seg in body.split(sep)[1:]:
+            if seg.strip(b"\r\n-") == b"":
+                continue
+            if b"\r\n\r\n" in seg:
+                head, _, payload = seg.partition(b"\r\n\r\n")
+                headers = head.decode("utf-8", "replace")
+                if 'filename="' in headers:
+                    fm = re.search(r'filename="([^"]*)"', headers)
+                    if payload.endswith(b"\r\n"):
+                        payload = payload[:-2]
+                    return payload, (fm.group(1) if fm else "")
+        raise HTTPException(400, "multipart 中未找到文件字段")
+    return body, request.query_params.get("filename", "")
+
+
+@app.post("/api/import/upload")
+async def api_import_upload(request: Request):
+    raw = await request.body()
+    with _import_mutex:
+        _purge_stale_import()
+        if _lock_read() is not None:
+            raise HTTPException(409, "已有导入任务进行中，请稍后再试")
+        data, filename = _extract_upload(request, raw)
+        if not data:
+            raise HTTPException(400, "上传内容为空")
+        if len(data) > IMPORT_MAX_BYTES:
+            raise HTTPException(413, "文件超过 50MB 上限")
+        ext = Path(filename or "").suffix.lower()
+        if ext not in IMPORT_ALLOWED_EXTS:
+            raise HTTPException(400, "仅支持 .jsonl / .json / .csv 文件")
+        IMPORT_TMP_DIR.mkdir(parents=True, exist_ok=True)
+        import_id = uuid.uuid4().hex
+        tmp = IMPORT_TMP_DIR / (import_id + ext)
+        try:
+            tmp.write_bytes(data)
+            _lock_write({"import_id": import_id, "filename": Path(filename).name,
+                         "created": time.time()})
+        except OSError as e:
+            _import_cleanup(import_id)
+            raise HTTPException(500, f"落盘失败: {e}")
+        return {"import_id": import_id, "filename": Path(filename).name,
+                "size": len(data)}
+
+
+@app.post("/api/import/preview")
+def api_import_preview(body: ImportPreviewBody):
+    with _import_mutex:
+        if not _lock_read() or _lock_read().get("import_id") != body.import_id:
+            raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
+        src = _import_file(body.import_id)
+        try:
+            report = run_doctor(src)
+            candidates = report.get("candidates") or []
+            # 每方前 3 条脱敏样例（content_clean，不含原文 PII）
+            samples: dict[str, list] = {}
+            imp = (importer_registry.by_name(report["importer"])
+                   if report.get("importer") else None)
+            if imp is not None:
+                try:
+                    for rec in imp.parse(src):
+                        acct = rec.get("accountName") or "(空账号名)"
+                        bucket = samples.setdefault(acct, [])
+                        if len(bucket) < 3:
+                            text, _ = p1.mask_privacy(p1.clean_text(rec.get("content") or ""))
+                            bucket.append({"type": rec.get("type"),
+                                           "text": text[:200] or "[无文本内容]"})
+                except Exception:
+                    pass                    # 样例尽力而为，报告本身已含错误信息
+            for c in candidates:
+                c["samples"] = samples.get(c["account"], [])
+        except Exception as e:
+            _import_cleanup(body.import_id)          # 预览失败即清理
+            raise HTTPException(500, f"预览失败: {str(e)[:200]}")
+        if not report.get("recognized"):
+            _import_cleanup(body.import_id)          # 无法识别的文件直接清理
+        return {"import_id": body.import_id, "report": report,
+                "candidates": candidates}
+
+
+@app.post("/api/import/commit")
+def api_import_commit(body: ImportCommitBody):
+    sender_a = (body.sender_a or "").strip()
+    sender_b = (body.sender_b or "").strip()
+    if not sender_a or not sender_b:
+        raise HTTPException(400, "需要选择 A/B 双方账号")
+    if sender_a == sender_b:
+        raise HTTPException(400, "A/B 不能是同一个账号")
+    with _import_mutex:
+        lock = _lock_read()
+        if not lock or lock.get("import_id") != body.import_id:
+            raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
+        src = _import_file(body.import_id)
+        gap_minutes = body.session_gap_minutes or \
+            int(cfg_mod.load()["chat"]["session_gap_minutes"])
+        try:
+            summary = p1.ingest(src, {sender_a: "A", sender_b: "B"},
+                                db_path=cfg_mod.db_path(),
+                                session_gap_s=gap_minutes * 60)
+        except (SystemExit, Exception) as e:
+            raise HTTPException(500, f"导入失败: {str(e)[:300]}")
+        finally:
+            _import_cleanup(body.import_id)          # 链路结束（含失败）立即清理
+        for sid in list(_engines):                   # 旧库已被重建，缓存引擎全部失效
+            _drop_engine(sid)
+        return {"ok": True, "summary": summary}
 
 
 # ---------------------------------------------------------------- 静态前端
