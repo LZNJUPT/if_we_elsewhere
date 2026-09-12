@@ -1,0 +1,17 @@
+﻿id,MsgSvrID,type_name,is_sender,talker,room_name,msg,src,CreateTime
+1,7437267147299592501,文本,1,wxid_demo_me,wxid_demo_peer,今晚吃火锅吗,,1726010000
+2,7437267147299592502,文本,0,wxid_demo_peer,wxid_demo_me,吃！老地方？,,"2024-09-11 09:30:00"
+3,7437267147299592503,图片,0,wxid_demo_peer,wxid_demo_me,,File\dd0e62b6\Image\2024-10\img001.dat,1726010120
+4,7437267147299592504,动画表情,1,wxid_demo_me,wxid_demo_peer,,emo\emoji_gif_001.gif,1726010180
+5,7437267147299592505,文件,0,wxid_demo_peer,wxid_demo_me,聚会的照片.zip,File\dd0e62b6\File\2024-10\zip001.dat,1726010240
+6,7437267147299592506,音视频通话,1,wxid_demo_me,wxid_demo_peer,,[语音通话] 00:05:32,1726010300
+7,7437267147299592507,引用,0,wxid_demo_peer,wxid_demo_me,"[引用 wxid_demo_me：今晚吃火锅吗] 吃！老地方？",,1726010360
+8,7437267147299592508,名片,0,wxid_demo_peer,wxid_demo_me,推荐的人名片,,1726010420
+9,7437267147299592509,转账,1,wxid_demo_me,wxid_demo_peer,￥200.00,,1726010480
+10,7437267147299592510,撤回,0,wxid_demo_peer,wxid_demo_me,你撤回了一条消息,,1726010540
+11,7437267147299592511,语音,0,wxid_demo_peer,wxid_demo_me,,File\dd0e62b6\Voice\2024-10\v001.aud,1726010600
+12,7437267147299592512,视频,1,wxid_demo_me,wxid_demo_peer,,File\dd0e62b6\Video\2024-10\vd001.mp4,1726010660
+13,7437267147299592513,系统通知,0,wxid_demo_peer,wxid_demo_me,"{""src"": """", ""msg"": ""你已添加了对方""}",,1726010720
+14,7437267147299592514,文本,1,wxid_demo_me,12345678@chatroom,群里的消息不算,,1726010780
+15,7437267147299592515,文本,1,wxid_demo_me,wxid_demo_peer,这条没时间戳会被跳过,,
+16,,文本,1,wxid_demo_me,wxid_demo_peer,这条MsgSvrID为空但仍可导入,,1726010900
