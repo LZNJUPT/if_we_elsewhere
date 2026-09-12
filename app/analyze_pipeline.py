@@ -333,12 +333,38 @@ def build_persona_llm(conn, client, person: str) -> bool:
     return _save_persona(person, data)
 
 
+def persona_file_is_empty(path: Path) -> bool:
+    """判断 persona JSON 是否还是空模板（display_name 与所有层 items 均为空）；
+    文件缺失或解析失败按非空处理（避免误判后覆盖）"""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(d, dict):
+        return False
+    if (d.get("display_name") or "").strip():
+        return False
+    for layer in (d.get("layers") or {}).values():
+        for it in (layer.get("items") or []):
+            if isinstance(it, dict) and (it.get("item") or "").strip():
+                return False
+    return True
+
+
 def build_persona_template(person: str) -> bool:
-    """手写模板：空档案 + 编辑指引（用户手填后即可跑对话）"""
+    """手写模板：空档案 + 编辑指引（用户手填后即可跑对话）；
+    已有手写档案（非空模板）时不覆盖，防止重跑分析抹掉用户填写内容"""
+    pdir = cfg_mod.persona_dir()
+    out = pdir / f"persona_v1_{person}.json"
+    if out.exists() and not persona_file_is_empty(out):
+        print(f"  [persona/{person}] 已有手写档案，跳过空模板覆盖"
+              f"（想重置请删除 {out.name} 后重跑）")
+        return True
     data = {
         "display_name": "",
         "_how_to_edit": "这是手写模板：把各层 items 填上（label 可用【事实】/【推断】），"
-                        "display_name 填界面显示名。也可删掉本文件后用 LLM 路径重新生成。",
+                        "display_name 填界面显示名。填写范例见 sample_data/persona_v1_*.json；"
+                        "也可删掉本文件后用 LLM 路径重新生成。",
         "layers": {k: {"items": []} for k in PERSONA_LAYERS},
     }
     return _save_persona(person, data)

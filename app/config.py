@@ -105,6 +105,91 @@ def load() -> dict:
     return cfg
 
 
+def persist_import_config(source: str, smap: dict[str, str]) -> bool:
+    """导入成功后把 chat.source 与 people.A/B.match 回填进 config.yaml。
+
+    smap 是 {原始账号名: "A"/"B"}；source 相对/绝对路径均可（相对路径统一 / 分隔）。
+    优先对文件文本做最小替换（保留注释与手改内容）；替换后校验不通过（结构对不上）
+    再退回「YAML 解析 → 更新字段 → 整体重写」兜底（值保证正确，注释会丢失）。
+    返回 True 表示文件已更新；False 表示无需更新或回填失败（不影响导入结果）。
+    """
+    import json
+    import re
+    import yaml  # 延迟导入：仅在存在配置文件时需要 PyYAML
+
+    cfg_path = ROOT / "config.yaml"
+    if not cfg_path.is_file():
+        return False
+    orig_text = cfg_path.read_text(encoding="utf-8")
+    inv = {v: (k or "").strip() for k, v in smap.items()}      # A/B -> 原始账号名
+
+    def _values_ok(d: dict) -> bool:
+        if source and ((d.get("chat") or {}).get("source") or "") != source:
+            return False
+        people = d.get("people") or {}
+        for key in ("A", "B"):
+            name = inv.get(key, "")
+            if name and ((people.get(key) or {}).get("match") or "") != name:
+                return False
+        return True
+
+    try:    # 值本来就对：直接跳过，不做任何写入
+        current = yaml.safe_load(orig_text)
+        if isinstance(current, dict) and _values_ok(current):
+            return False
+    except Exception:
+        pass
+
+    def _scalar(v: str) -> str:
+        # JSON 字符串语法是 YAML 双引号标量的子集，可安全承载任意账号名/路径
+        return json.dumps(v, ensure_ascii=False)
+
+    text = orig_text
+    for key in ("A", "B"):
+        name = inv.get(key, "")
+        if not name:
+            continue
+        text = re.sub(
+            rf"(?m)^([ \t]*{key}:[^\n{{}}]*\{{[^\n{{}}]*?match:[ \t]*)"
+            rf"(\"[^\"\n]*\"|'[^'\n]*'|[^,{{}}\n]+)",
+            lambda m: m.group(1) + _scalar(name), text, count=1)
+    if source:
+        text = re.sub(
+            r"(?m)^([ \t]*source:[ \t]*)(\"[^\"\n]*\"|'[^'\n]*'|[^,#\n]+)",
+            lambda m: m.group(1) + _scalar(source), text, count=1)
+
+    try:
+        parsed = yaml.safe_load(text)
+        if isinstance(parsed, dict) and _values_ok(parsed):
+            if text != orig_text:
+                cfg_path.write_text(text, encoding="utf-8")
+                return True
+            return False                                   # 值本来就对，无需写
+    except Exception:
+        pass
+
+    # 兜底：模板结构对不上/解析失败 → 解析原文件整体重写（注释会丢失）
+    try:
+        data = yaml.safe_load(orig_text)
+        if not isinstance(data, dict):
+            raise ValueError("config.yaml 顶层不是键值映射")
+    except Exception as e:
+        print(f"[config] config.yaml 无法解析（{e}），跳过回填；"
+              "请手动填写 chat.source 与 people.A.match / people.B.match")
+        return False
+    if source:
+        data.setdefault("chat", {})["source"] = source
+    people = data.setdefault("people", {})
+    for key in ("A", "B"):
+        name = inv.get(key, "")
+        if name and isinstance(people.get(key), dict):
+            people[key]["match"] = name
+    cfg_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8")
+    return True
+
+
 def root() -> Path:
     return ROOT
 

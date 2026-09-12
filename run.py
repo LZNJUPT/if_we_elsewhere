@@ -63,6 +63,9 @@ def cmd_init(args) -> int:
         summary = ingest(p, smap, db_path=cfg_mod.db_path(),
                          session_gap_s=int(cfg["chat"]["session_gap_minutes"]) * 60)
         if summary.get("gates_all_pass"):
+            if cfg_mod.persist_import_config(Path(src).as_posix(), smap):
+                print("[init] 已将 source/账号映射写入 config.yaml"
+                      "（之后重导入无需再带 --sender-a/--sender-b）")
             print("[init] 导入完成。下一步: python run.py analyze")
             return 0
         print("[init] 导入完成，但存在未通过的门禁项（见上方汇总），请检查数据")
@@ -96,9 +99,24 @@ def cmd_doctor(args) -> int:
 # ---------------------------------------------------------------- analyze
 def cmd_analyze(args) -> int:
     sys.path.insert(0, str(ROOT / "app"))
+    import config as cfg_mod
     import analyze_pipeline
 
-    analyze_pipeline.run_all(skip_llm=args.skip_llm)
+    summary = analyze_pipeline.run_all(skip_llm=args.skip_llm)
+    if summary.get("persona") == "template":
+        pdir = cfg_mod.persona_dir()
+        try:
+            pdir_disp = pdir.relative_to(ROOT).as_posix()
+        except ValueError:
+            pdir_disp = str(pdir)
+        empties = [f"persona_v1_{p}.json" for p in ("A", "B")
+                   if (pdir / f"persona_v1_{p}.json").exists()
+                   and analyze_pipeline.persona_file_is_empty(pdir / f"persona_v1_{p}.json")]
+        if empties:
+            print(f"""
+[note] persona 还是空模板：请编辑 {pdir_disp}/{' 与 '.join(empties)}
+       各层填什么见文件内 _how_to_edit；填写范例见 sample_data/persona_v1_*.json
+       编辑后无需重跑分析：新开一条对话线（或重启 python run.py server）即生效""")
     return 0
 
 

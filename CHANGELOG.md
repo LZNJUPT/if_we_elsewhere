@@ -36,6 +36,22 @@
 - 文档：IMPORT（中/EN）重写「数据从哪来」（格式表 + 外部工具官方链接，
   只链接不教程化）；PRIVACY（中/EN）增补 Web 导入数据流与临时文件生命周期。
 
+### 修复（新用户验证反馈）
+
+- **`init` 带参导入成功后回填 config.yaml**：`chat.source` 与
+  `people.A.match / people.B.match` 自动写入（模板文本最小替换保留注释，
+  结构对不上时回退 YAML 重写）；`scripts/import_chat.py` 同样接入。
+  此前仅复制模板，映射用完即弃，二次导入只带 `--source` 会报
+  「缺少账号名映射」（BUG_REPORT_NEWUSER_2026-09-12 Bug #1）。
+- **persona `display_name` 为空串时回退失效**：`--skip-llm` 空模板的
+  `""` 会让提示词出现 `你是「」`；现按空值处理，回退 config
+  `people.{A,B}.display`（BUG_REPORT_NEWUSER_2026-09-12 Issue #2）。
+- **重跑 `analyze --skip-llm` 不再覆盖手写 persona**：非空档案跳过模板
+  写入并提示；`analyze` 完成时空模板会打印填写指引（模板路径 / 范例 /
+  生效方式：新开对话线或重启 server，无需重跑分析）。
+- 文档：QUICKSTART §4 增补「配置自动写回」说明与 §4.1 手写 persona
+  指引（各层填法、范例位置、生效机制）。
+
 ### 明确未做（立场声明）
 
 - **未内置任何 IM 的数据库解析**：本项目不接触微信/Telegram 等客户端的

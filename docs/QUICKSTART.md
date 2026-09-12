@@ -63,7 +63,36 @@ python run.py analyze       # 生成事件/记忆/关系状态/转折点/人格�
 # 无 API Key：python run.py analyze --skip-llm（启发式事件 + 手写 persona 模板）
 ```
 
+带参导入成功后，`chat.source` 与 `people.A.match / people.B.match` 会**自动写回
+config.yaml**。之后数据更新了，只需再跑一次 `python run.py init --source 新文件.jsonl`
+（账号映射复用配置，不必每次都带 `--sender-a/--sender-b`），或直接
+`python scripts/import_chat.py`（完全按 config.yaml 的 source/match 导入）。
+
 格式说明见 [IMPORT.md](IMPORT.md)。
+
+### 4.1 手写 persona（`--skip-llm` 线）
+
+`analyze --skip-llm` 走离线路径，生成的是**空模板**：
+`data/persona/persona_v1_A.json` 与 `persona_v1_B.json`。界面/时间轴里的名字
+固定显示「你」和「TA」，但**对话个性完全由这两个文件决定**——不填的话数字人格
+会很「呆」（demo 里的示例人物有个性，是因为装载了 `sample_data/` 下的完整范例）。
+
+每个文件按 L/M/S/U 四层填写，每条格式 `{"label": "…", "item": "≤40 字"}`，
+每层 2~5 条；`label` 客观可验证的写【事实】，主观推断的写【推断】：
+
+| 字段 / 层 | 填什么 |
+| --- | --- |
+| `display_name` | 对话里 LLM 认知的名字；留空则回退 `config.yaml` 的 `people.B.display`（默认「TA」） |
+| `layers.L` 语言风格 | 用词习惯、句长、标点/表情习惯、口头禅 |
+| `layers.M` 压力与意义 | 近期在忙什么、压力源、在意什么 |
+| `layers.S` 情绪与冲突 | 情绪起伏规律、冲突时的典型反应与修复方式 |
+| `layers.U` 自我认知 | 本人认可的自我描述/底线（最优先遵守）；拿不准可留空 |
+
+> 填写范例：`sample_data/persona_v1_A.json` / `persona_v1_B.json`，可对照着写。
+
+生效方式：**编辑后不需要重跑 analyze**——新开一条对话线（或重启
+`python run.py server`）就会读取新档案。另外，重跑 `analyze --skip-llm`
+**不会覆盖**已填写的档案；想重置模板请删除对应 persona 文件后再跑。
 
 ## 5. 日常启动
 

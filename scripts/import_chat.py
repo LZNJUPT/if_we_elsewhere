@@ -92,6 +92,13 @@ def main() -> int:
     summary = ingest(src, smap, db_path=cfg_mod.db_path(),
                      session_gap_s=int(cfg["chat"]["session_gap_minutes"]) * 60,
                      no_reset=args.no_reset, importer=imp)
+    if summary.get("gates_all_pass"):
+        try:
+            stored = src.relative_to(ROOT).as_posix()
+        except ValueError:
+            stored = src.as_posix()
+        if cfg_mod.persist_import_config(stored, smap):
+            print("[i] 已将 source/账号映射写入 config.yaml（下次导入无需再带映射参数）")
     print("\n导入完成。下一步: python run.py analyze（生成事件/记忆/关系状态/人格）")
     return 0 if summary.get("gates_all_pass") else 1
 

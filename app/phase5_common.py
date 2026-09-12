@@ -80,7 +80,7 @@ def persona_layer_text(person: str, layer: str) -> str:
 def deliver_persona_block(person: str) -> str:
     """A2 用：组装 L/M/S/U 四层提示块（含用户主观真值 U 置顶提示）"""
     p = load_persona_json(person)
-    name = p.get("display_name", SENDER_NAME.get(person, person))
+    name = (p.get("display_name") or "").strip() or SENDER_NAME.get(person, person)
     blocks = [f"你是「{name}」，以下是你的长期人格档案（派生自真实关系分析，禁止推断档案之外的细节）："]
     layer_titles = {"L": "语言风格(L层·时不变)", "M": "压力与意义(M层·中期)",
                     "S": "情绪与冲突模式(S层·动态)", "U": "自我认知(U层·用户校准真值，最优先遵守)"}
@@ -95,7 +95,7 @@ def persona_lite_block(person: str) -> str:
     """A2 每回合精简卡：风格要点(L【事实】优先) + S 冲突模式前几条 + U 层全部。
     目的：减少全量人格重复锚定（“人机感”来源之一），日常回合只提示高信号特征。"""
     p = load_persona_json(person)
-    name = p.get("display_name", SENDER_NAME.get(person, person))
+    name = (p.get("display_name") or "").strip() or SENDER_NAME.get(person, person)
     def items(lk):
         return p.get("layers", {}).get(lk, {}).get("items", [])
     l_fact = [(it.get("item", ""), it.get("label", "")) for it in items("L")
