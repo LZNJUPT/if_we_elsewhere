@@ -590,7 +590,7 @@ function renderImpResult(s) {
   const ok = !!s.gates_all_pass;
   const gates = s.gates || {};
   const gname = { G2_时间序列有序: "时间序列有序", G3_双人占比: "双人占比",
-    G4_长断档告警: "长断档告警（不阻塞）", G5_脱敏残留: "脱敏残留", G7_未知发送者/类型: "未知发送者/类型" };
+    G4_长断档告警: "长断档告警（不阻塞）", G5_脱敏残留: "脱敏残留", "G7_未知发送者/类型": "未知发送者/类型" };
   $("#impResult").innerHTML =
     `<h3 class="${ok ? "ok" : "bad"}">${ok ? "✓ 导入完成，全部门禁通过" : "导入完成，但存在未通过的门禁"}</h3>
      <div class="imp-kv">
