@@ -50,6 +50,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
+import config as cfg_mod
 import phase4_retrieval
 import phase5_a2_loop as loop
 import phase5_a3_buffer as buf
@@ -61,7 +62,7 @@ HUMAN = "A"          # 用户本人
 PARTNER = "B"        # 数字人格
 KIND = "dial"        # 线类型标记（写入 sim_runs.config_json）
 
-AUTO_DAY_TURNS = 20              # 累计消息数达到该值时自然跨天（可在 config defaults.auto_day_turns 调整）
+AUTO_DAY_TURNS = int(cfg_mod.load()["defaults"]["auto_day_turns"])
 MEM_TOP_K = 5
 # 同类型事件当天最多计权次数（第 2 次衰减 ≈0.5 倍，第 3 次起不计）
 # 依据：关系状态是「月粒度」估计，一天内重复的同类型互动不应线性刷高五维
@@ -69,11 +70,15 @@ MAX_SAME_EVENT_PER_DAY = 2
 
 
 def get_default_start(conn: sqlite3.Connection) -> str:
-    """「接着往下聊」的默认起点 = 最后一条真实消息的次日；无数据时退回今天"""
+    """「接着往下聊」的默认起点：start_after_last=true 时取最后一条消息的次日，
+    否则取最后一条消息当天；无数据时退回今天"""
     try:
         row = conn.execute("SELECT MAX(day) FROM messages WHERE day IS NOT NULL").fetchone()
         if row and row[0]:
-            return (date.fromisoformat(row[0]) + timedelta(days=1)).isoformat()
+            last = date.fromisoformat(row[0])
+            if cfg_mod.load()["defaults"]["start_after_last"]:
+                last = last + timedelta(days=1)
+            return last.isoformat()
     except sqlite3.Error:
         pass
     return date.today().isoformat()
@@ -649,7 +654,7 @@ def cmd_show(args) -> None:
         if day != cur_day:
             print(f"\n──── {day} ────")
             cur_day = day
-        who = "你" if sender == HUMAN else "她"
+        who = "你" if sender == HUMAN else "TA"
         extra = ""
         try:
             m = json.loads(meta or "{}")

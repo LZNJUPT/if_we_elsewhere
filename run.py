@@ -58,7 +58,9 @@ def cmd_init(args) -> int:
             print(f"[init] 源文件不存在: {p}")
             return 2
         print(f"[init] 导入 {p}（映射 {smap}）…")
-        summary = ingest(p, smap, db_path=cfg_mod.db_path())
+        cfg = cfg_mod.load()
+        summary = ingest(p, smap, db_path=cfg_mod.db_path(),
+                         session_gap_s=int(cfg["chat"]["session_gap_minutes"]) * 60)
         if summary.get("gates_all_pass"):
             print("[init] 导入完成。下一步: python run.py analyze")
             return 0

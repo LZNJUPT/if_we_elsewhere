@@ -47,7 +47,16 @@ def main() -> int:
     ap.add_argument("--no-reset", action="store_true", help="复用已有库（默认全量重建）")
     args = ap.parse_args()
 
-    src = Path(args.source or cfg_mod.load()["chat"]["source"])
+    cfg = cfg_mod.load()
+    if cfg["chat"]["format"] != "chatlab":
+        raise SystemExit(f"v1 仅支持 chatlab(WeFlow) 格式（当前 chat.format={cfg['chat']['format']}）；"
+                         "其他格式在路线图")
+    if cfg["chat"]["timezone"] != "Asia/Shanghai":
+        print("[warn] v1 导入固定按东八区(Asia/Shanghai)解析时间戳；其他时区字段预留未生效")
+    if cfg["privacy"]["sanitize"] != "medium":
+        print("[warn] v1 仅提供 medium 脱敏档位；其余档位字段预留未生效")
+
+    src = Path(args.source or cfg["chat"]["source"])
     if not src.is_absolute():
         src = ROOT / src
     if not src.is_file():
@@ -56,7 +65,9 @@ def main() -> int:
     smap = sender_map_from(args)
     print(f"[i] 源文件: {src}")
     print(f"[i] 账号名映射: {smap}（库内只存 A/B 代号，sender_orig 仅本地保留）")
-    summary = ingest(src, smap, db_path=cfg_mod.db_path(), no_reset=args.no_reset)
+    summary = ingest(src, smap, db_path=cfg_mod.db_path(),
+                     session_gap_s=int(cfg["chat"]["session_gap_minutes"]) * 60,
+                     no_reset=args.no_reset)
     print("\n导入完成。下一步: python run.py analyze（生成事件/记忆/关系状态/人格）")
     return 0 if summary.get("gates_all_pass") else 1
 

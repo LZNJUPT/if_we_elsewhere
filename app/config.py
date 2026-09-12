@@ -152,3 +152,10 @@ def sender_names() -> dict[str, str]:
         disp = (people.get(k, {}) or {}).get("display") or ""
         out[k] = disp.strip() or k
     return out
+
+
+def person_display_name(person: str) -> str:
+    """persona 展示名：优先 people.{key}.name，缺省用 display，最后用代号"""
+    people = load()["people"]
+    p = people.get(person, {}) or {}
+    return (p.get("name") or p.get("display") or person).strip() or person

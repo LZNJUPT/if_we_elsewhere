@@ -142,5 +142,9 @@ def plan_user_block(persona_block: str, world_desc: str, memories_text: str,
             "请输出 JSON：{\"plan\": …}")
 
 
-def get_client(max_tokens: int = 8192) -> DeepSeekRepairClient:
+def get_client(max_tokens: int | None = None) -> DeepSeekRepairClient:
+    """构造共享 LLM 客户端；max_tokens 缺省取 config llm.max_tokens"""
+    if max_tokens is None:
+        import config as cfg_mod
+        max_tokens = int(cfg_mod.load()["llm"]["max_tokens"])
     return DeepSeekRepairClient(max_tokens=max_tokens, max_attempts=3)

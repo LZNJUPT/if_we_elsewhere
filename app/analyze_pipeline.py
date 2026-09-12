@@ -26,7 +26,6 @@ from pathlib import Path
 import config as cfg_mod
 import phase5_common as pc
 import phase6_engine as p6
-from phase1_ingest import TZ, SESSION_GAP_S
 
 APP_DIR = Path(__file__).resolve().parent
 SCHEMAS = ["schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
@@ -42,8 +41,11 @@ def _apply_all_schemas(conn) -> None:
     conn.commit()
 
 
-def _load_msgs_grouped(conn, session_gap_s: int = SESSION_GAP_S) -> list[list[dict]]:
-    """按 phase1 同款 30 分钟间隔重建会话分组（messages 表不存 session_id）"""
+def _load_msgs_grouped(conn, session_gap_s: int | None = None) -> list[list[dict]]:
+    """按 phase1 同款间隔重建会话分组（messages 表不存 session_id）；
+    间隔默认取 config chat.session_gap_minutes"""
+    if session_gap_s is None:
+        session_gap_s = int(cfg_mod.load()["chat"]["session_gap_minutes"]) * 60
     rows = conn.execute(
         "SELECT ts, day, sender_key, subtype, content_clean, has_privacy "
         "FROM messages ORDER BY ts ASC").fetchall()
@@ -310,7 +312,7 @@ def build_persona_llm(conn, client, person: str) -> bool:
     if not samples:
         print(f"  [persona/{person}] 没有可用的文本消息，跳过（可手写模板）")
         return False
-    name = cfg_mod.sender_names().get(person, person)
+    name = cfg_mod.person_display_name(person)
     joined = "\n".join(f"- {s[:120]}" for s in samples)
     sys_prompt = (
         "你是 IfWe 的人格档案生成器。根据某人在私聊中的发言抽样，产出 TA 的四层人格档案 JSON。"

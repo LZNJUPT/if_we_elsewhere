@@ -366,6 +366,9 @@ def api_say(body: SayBody):
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(400, "消息为空")
+    if not cfg_mod.load()["privacy"]["allow_llm_send"]:
+        raise HTTPException(403, "已在 config.yaml 中关闭外发（privacy.allow_llm_send=false）；"
+                                 "如需对话推演，请显式开启并自行确认隐私边界")
     if not cfg_mod.api_key():
         key_env = cfg_mod.load()["llm"]["api_key_env"]
         raise HTTPException(400, f"缺少 LLM API Key：请设置环境变量 {key_env} 后重启服务")

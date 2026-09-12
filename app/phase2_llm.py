@@ -238,6 +238,7 @@ class DeepSeekRepairClient:
     def __init__(self, api_key: Optional[str] = None, max_tokens: int = 4096, max_attempts: int = 3):
         from openai import OpenAI
 
+        self.provider = _llm_cfg["provider"]        # 透传记录（provider 仅做标识/日志）
         self.api_key = api_key or cfg_mod.api_key()
         if not self.api_key:
             env_name = cfg_mod.load()["llm"]["api_key_env"]
@@ -247,6 +248,8 @@ class DeepSeekRepairClient:
         self.max_tokens = max_tokens
         self.max_attempts = max_attempts
         self.last_usage: Optional[dict] = None
+        logger.info("LLM client: provider=%s model=%s base_url=%s",
+                    self.provider, self.model, BASE_URL)
 
     def extract(self, system: str, user: str, response_model=SessionExtraction):
         """调用 + 修复 + 校验，返回 pydantic 对象"""
