@@ -27,6 +27,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 控制台不是 UTF-8（Windows GBK / runner cp1252）时，打印中文会 UnicodeEncodeError。
+# 统一把标准流改成 UTF-8 + 宽容替换，保证脚本在任何终端都能跑完。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 # 随机附带在包根的说明文件（都是在版本管理内的公开文档）
 EXTRA_FILES = ["README.md", "DISCLAIMER.md", "PRIVACY.md", "LICENSE", "VERSION",
                "config.example.yaml", "docs/QUICKSTART.md"]

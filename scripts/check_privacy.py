@@ -19,6 +19,15 @@ import argparse
 import sys
 from pathlib import Path
 
+# 控制台不是 UTF-8（Windows GBK）时打印 ✅ 会 UnicodeEncodeError（2026-09-12 实测），
+# 统一把标准流改成 UTF-8 + 宽容替换。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # ---- 红线词表（可配置扩展；新增词条同时更新 PRIVACY.md） ----
