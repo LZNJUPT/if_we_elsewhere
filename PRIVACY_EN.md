@@ -41,9 +41,10 @@
 | Sanitization | Medium-level sanitization runs **before** anything is stored; `content_clean` is the only text source for analysis and LLM calls |
 | Simulation isolation | Replays write to `sim_*` tables; the main DB gets zero writes during a replay (verified automatically by the offline selftest) |
 | Counterfactual freeze | After a branch's fork point, real memories are time-truncated, so the model cannot see the future you rewrote |
-| Keys | Read from environment variables only (default `LLM_API_KEY`), never written to disk or the repo |
+| Keys | Environment variable first (default `LLM_API_KEY`); keys entered in the in-app Settings panel go to the **Windows Credential Manager** (service `IfWe`, account = `llm.api_key_env`), with a current-user **DPAPI-encrypted** file (`data/.secret_llm_key`) as fallback. `config.yaml`, logs and every API response stay key-free (`GET /api/settings` returns only `sk-***abc`) |
 | Web import | Uploaded files land only in the local temp directory `data/tmp_import/`; the upload → preview → commit chain **deletes them immediately when it ends** (including failures); preview returns statistics and sanitized samples only — never raw text or server paths |
-| Repo hygiene | `data/` and `config.yaml` are always gitignored; sample data is purely fictional |
+| Friend isolation | One data directory per friend (`data/profiles/<id>/`: database, persona, cache, conversations); switching friends switches the whole data context. Pre-migration backups go to `data_backup_<date>/` (gitignored) |
+| Repo hygiene | `data/`, `data_demo/`, `config.yaml` and `data_backup_*/` are always gitignored; sample data is purely fictional |
 
 ## Web import wizard data flow (v0.2)
 
@@ -62,6 +63,22 @@ The "Import" entry in the left sidebar uses the same local pipeline as the CLI:
 
 Everything happens on your computer; this project has no server and performs
 no remote uploads.
+
+## Keys and data directories (v0.3, desktop-era)
+
+**Keys** (in priority order): environment variable → Windows Credential Manager (service
+`IfWe`) → `data/.secret_llm_key` (DPAPI ciphertext, decryptable only by the current Windows
+user). Clear a key with the in-app "clear key" button or `python run.py key clear` (both
+locations are wiped).
+
+**Data layout**: `data/profiles.json` (friend registry) + `data/profiles/<id>/` (one full
+set per friend) + `data/tmp_import/` (import wizard, deleted when the chain ends).
+API responses only ever contain relative paths (e.g. `data/profiles/ada`).
+
+**Launcher traces**: `data/.ifwe.lock` (single-instance lock: pid + port + start time,
+removed on clean exit, cleaned up on the next launch otherwise). The server binds to
+`127.0.0.1` only, and closing the window stops it. A packaged build keeps `data/` next to
+the exe and writes nothing to the registry or system directories.
 
 ## The privacy gate (this project's own bar)
 

@@ -275,6 +275,7 @@ function updateBusy() {
   $("#input").disabled = S.busy || !S.line;
   $("#btnSend").disabled = S.busy || !S.line;
   $("#btnDay").disabled = S.busy || !S.line;
+  syncActionButtons();
 }
 
 /* ---------------------------------------------------------------- 数据 */
@@ -461,6 +462,9 @@ function impStep(n) {
 
 function openImport() {
   IMP.id = null; IMP.report = null; IMP.candidates = [];
+  const nm = V3.curName();
+  $("#impTarget").innerHTML = `⚠ 导入会全量重建<b>当前好友「${esc(nm)}」</b>的数据库：` +
+    `他的推演线与分析产物会被清空（persona 文件保留）；<b>其他好友不受影响</b>。`;
   $("#impModal").classList.add("open");
   impStep(1);
 }
@@ -602,7 +606,17 @@ function renderImpResult(s) {
     Object.entries(gates).map(([k, v]) =>
       `<div class="imp-gate${v ? "" : " bad"}"><span class="${v ? "g-ok" : "g-bad"}">${v ? "✓" : "✕"}</span>${esc(gname[k] || k)}</div>`).join("") +
     `</div>
-     <div style="margin-top:10px">下一步：关闭本窗口后运行分析（<b>python run.py analyze</b> 或重启时自动），即可开始对话推演。</div>`;
+     <div class="imp-next">
+       <span>下一步：在本机跑一遍分析（事件 / 记忆 / 关系状态 / 转折点 / 人格档案）</span>
+       <label class="chk"><input type="checkbox" id="impSkipLLM"><span>离线分析</span></label>
+       <button class="btn btn-primary btn-sm" id="impAnalyze">立即分析</button>
+     </div>`;
+  const ia = $("#impAnalyze");
+  if (ia) ia.onclick = () => {
+    const skip = $("#impSkipLLM") ? $("#impSkipLLM").checked : false;
+    closeImport();
+    openAnalyze(skip);
+  };
 }
 
 /* 向导事件绑定 */
@@ -681,13 +695,598 @@ $("#relHead").onclick = () => {
 
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
+/* ================================================================================
+   v0.3 桌面化：分析任务 / 人物档案 / LLM 设置 / 多好友 / 首次运行引导
+   ---- 与服务端约定 ----
+   POST /api/analyze            {skip_llm} → {job_id}
+   GET  /api/analyze/status     {running, phase, message, elapsed_s, stages, last_result, error}
+   POST /api/analyze/cancel     中止（阶段之间生效）
+   GET  /api/persona            只读档案（persona 四层 + 关系五维 + 转折点 + 统计）
+   GET/PUT /api/settings        设置读写（永远不回传完整 key）
+   POST /api/settings/test      最小一次补全验证连通性（超时 10s）
+   GET/POST/DELETE /api/profiles + switch / rename
+   GET  /api/onboarding, POST /api/onboarding/demo
+   ================================================================================ */
+const V3 = {
+  profiles: [], active: "", busy: "", analyze: null, timer: null,
+  frdMode: "new", frdId: "", onboarded: false,
+};
+
+function busyReason() {
+  if (V3.busy) return V3.busy;
+  if (V3.analyze && V3.analyze.running) return "分析正在进行中";
+  return "";
+}
+
+/* 分析/导入进行中：相关入口一律置灰并说明原因 */
+function syncActionButtons() {
+  const why = busyReason();
+  const tip = why ? `（${why}，暂时不可用）` : "";
+  const pairs = [
+    ["#btnImport", "导入聊天记录（本地，不上传任何远端）"],
+    ["#btnAnalyze", "在本机分析聊天记录（事件/记忆/关系/转折点/人格）"],
+    ["#btnDay", "推进一天"],
+  ];
+  for (const [sel, base] of pairs) {
+    const el = $(sel);
+    if (!el) continue;
+    if (sel === "#btnDay") {
+      el.disabled = (S.busy || !S.line) || !!why;   // 基础态来自 updateBusy 的判定
+      el.title = "推进一天" + tip;
+      continue;
+    }
+    el.disabled = !!why;
+    el.title = base + tip;
+  }
+  const nf = $("#fbNewBtn");
+  if (nf) nf.disabled = !!why;
+}
+
+/* ---------------------------------------------------------------- 好友 */
+function friendById(id) { return V3.profiles.find(p => p.id === id) || null; }
+V3.curName = function () {
+  if (V3.active && friendById(V3.active)) return friendById(V3.active).name;
+  const st = friendById("");
+  return st ? st.name : "当前数据目录";
+};
+
+function renderFriends() {
+  $("#fbCur").textContent = V3.curName();
+  const box = $("#fbList");
+  box.innerHTML = "";
+  if (!V3.profiles.length) {
+    box.innerHTML = '<div class="fb-empty">还没有好友档案。</div>';
+  }
+  for (const p of V3.profiles) {
+    const el = document.createElement("div");
+    const active = p.active || (!V3.active && p.synthetic);
+    el.className = "fb-item" + (active ? " active" : "") + (p.synthetic ? " locked" : "");
+    el.dataset.id = p.id;
+    const tag = p.synthetic ? '<span class="fb-tag">当前目录</span>'
+      : (p.has_db ? "" : '<span class="fb-tag">无数据</span>');
+    el.innerHTML =
+      `<span class="fb-nm" title="数据目录：${esc(p.dir || "")}">${esc(p.name)}</span>${tag}` +
+      (p.synthetic ? "" :
+        `<span class="fb-ops">
+           <button class="fb-op" data-op="rename" title="重命名">✎</button>
+           <button class="fb-op del" data-op="del" title="删除该好友及其全部数据">×</button>
+         </span>`);
+    el.onclick = e => {
+      const op = e.target.dataset ? e.target.dataset.op : "";
+      if (op === "rename") { e.stopPropagation(); openFriendModal("rename", p); return; }
+      if (op === "del") { e.stopPropagation(); delFriend(p); return; }
+      if (!active) switchFriend(p.id);
+    };
+    box.appendChild(el);
+  }
+  const acts = document.createElement("div");
+  acts.className = "fb-acts";
+  acts.innerHTML = '<button class="btn btn-sm" id="fbNewBtn">＋ 新建好友</button>';
+  box.appendChild(acts);
+  $("#fbNewBtn").onclick = () => openFriendModal("new");
+  /* 有多个好友时默认展开列表；用户手动开合过就尊重用户的选择 */
+  if (!V3.fbTouched && V3.profiles.length > 1) {
+    $("#fbBody").classList.add("open");
+    $("#fbCaret").textContent = "▴";
+  }
+  syncActionButtons();
+}
+
+async function loadProfiles() {
+  try {
+    const d = await api("/api/profiles");
+    V3.profiles = d.profiles || [];
+    V3.active = d.active || "";
+    V3.busy = d.busy || V3.busy;
+    if (d.busy) V3.busy = d.busy;
+    renderFriends();
+  } catch (e) { /* 好友列表失败不阻塞主流程 */ }
+}
+
+async function switchFriend(id) {
+  if (busyReason()) return toast("暂时不能切换好友：" + busyReason());
+  try {
+    toast("正在切换好友…");
+    const d = await api("/api/profiles/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    V3.profiles = d.profiles || []; V3.active = d.active || "";
+    S.anchors = null;                       // 换了好友：时间轴等缓存全部作废
+    renderFriends();
+    await refresh();
+    toast(`已切换到「${V3.curName()}」`);
+  } catch (e) { toast("切换失败：" + e.message); }
+}
+
+async function delFriend(p) {
+  const ok = confirm(
+    `删除好友「${p.name}」？\n\n` +
+    `• 该好友的全部数据将被删除：聊天库、人格档案、表情包缓存、所有对话线\n` +
+    `• 数据目录：${p.dir}\n` +
+    `• 其他好友不受影响\n\n此操作不可撤销。`);
+  if (!ok) return;
+  try {
+    const d = await api("/api/profiles/" + encodeURIComponent(p.id), { method: "DELETE" });
+    V3.profiles = d.profiles || []; V3.active = d.active || "";
+    S.anchors = null;
+    renderFriends();
+    await refresh();
+    toast("已删除该好友");
+  } catch (e) { toast("删除失败：" + e.message); }
+}
+
+function openFriendModal(mode, p) {
+  V3.frdMode = mode;
+  V3.frdId = p ? p.id : "";
+  $("#frdTitle").textContent = mode === "rename" ? "重命名好友" : "新建好友";
+  $("#frdName").value = p ? p.name : "";
+  $("#frdHint").innerHTML = mode === "rename"
+    ? "只改显示名，数据目录不变。"
+    : "每个好友拥有完全独立的数据目录（库、人格档案、表情包、对话线），互不可见。";
+  $("#frdModal").classList.add("open");
+  setTimeout(() => $("#frdName").focus(), 30);
+}
+
+async function submitFriend() {
+  const name = $("#frdName").value.trim();
+  if (!name) return toast("先给好友起个名字");
+  try {
+    if (V3.frdMode === "rename") {
+      const d = await api(`/api/profiles/${encodeURIComponent(V3.frdId)}/rename`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      V3.profiles = d.profiles || [];
+      toast("已重命名");
+    } else {
+      const d = await api("/api/profiles", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      V3.profiles = d.profiles || [];
+      toast(`已创建「${name}」，正在切换…`);
+      $("#frdModal").classList.remove("open");
+      await switchFriend(d.profile.id);
+      return;
+    }
+    $("#frdModal").classList.remove("open");
+    renderFriends();
+  } catch (e) { toast("操作失败：" + e.message); }
+}
+
+/* ---------------------------------------------------------------- 分析 */
+function anaStep(n) {
+  $("#ana-pane1").classList.toggle("active", n === 1);
+  $("#ana-pane2").classList.toggle("active", n === 2);
+}
+
+function openAnalyze(skipLLM) {
+  if (busyReason() === "导入正在进行中") return toast("导入正在进行中，稍后再分析");
+  $("#anaSkip").checked = !!skipLLM;
+  renderAnaHint();
+  $("#anaWho").textContent = `将在「${V3.curName()}」的数据目录内分析；产物只写在本机。`;
+  anaStep(V3.analyze && V3.analyze.running ? 2 : 1);
+  $("#anaModal").classList.add("open");
+  if (V3.analyze && V3.analyze.running) renderAnaProgress(V3.analyze);
+}
+
+function renderAnaHint() {
+  const skip = $("#anaSkip").checked;
+  $("#anaSkipHint").innerHTML = skip
+    ? "离线路径：关键词启发式判定事件 + persona 空模板。<b>零 token 成本</b>，结果较粗，之后可随时重跑。"
+    : "LLM 路径：逐会话抽取事件并生成人格档案，效果最好，<b>会消耗 token</b>（只发送脱敏后的文本）。";
+}
+
+async function startAnalyze() {
+  const skip = $("#anaSkip").checked;
+  anaStep(2);
+  $("#anaMsg").textContent = "正在启动分析…";
+  $("#anaCancel").style.display = "";
+  $("#anaFinish").disabled = true;
+  $("#anaStages").innerHTML = "";
+  try {
+    await api("/api/analyze", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skip_llm: skip }),
+    });
+    await tick();
+    startPolling();
+  } catch (e) {
+    toast("无法开始分析：" + e.message);
+    anaStep(1);
+  }
+}
+
+async function cancelAnalyze() {
+  try {
+    const d = await api("/api/analyze/cancel", { method: "POST" });
+    toast(d.message || "已请求中止");
+    $("#anaMsg").textContent = d.message || "正在中止…";
+  } catch (e) { toast("取消失败：" + e.message); }
+}
+
+function renderAnaStages(st) {
+  const box = $("#anaStages");
+  if (!box.children.length) {
+    box.innerHTML = (st.stages || []).map(s =>
+      `<li data-code="${esc(s.code)}"><i></i><span>${esc(s.label)}</span></li>`).join("");
+  }
+}
+
+function renderAnaProgress(st) {
+  renderAnaStages(st);
+  const order = (st.stages || []).map(s => s.code);
+  const cur = String(st.phase || "");
+  const curIdx = order.indexOf(cur);
+  const doneUpTo = st.running ? curIdx - 1 : curIdx;
+  $$("#anaStages li").forEach(li => {
+    const i = order.indexOf(li.dataset.code);
+    li.classList.toggle("done", i <= doneUpTo);
+    li.classList.toggle("on", st.running && i === curIdx);
+  });
+  $("#anaPhase").textContent = st.running
+    ? (cur ? `阶段 ${cur} · ${(st.stages || []).map(s => s.label)[curIdx] || ""}` : "准备中…")
+    : "已结束";
+  $("#anaElapsed").textContent = (st.elapsed_s || 0).toFixed(1) + "s";
+  if (st.running) $("#anaMsg").textContent = st.message || "处理中…";
+}
+
+function renderAnaResult(st) {
+  const box = $("#anaMsg");
+  box.className = "ana-msg";
+  if (st.error) {
+    box.innerHTML = `<div class="ana-result"><h3 class="bad">✕ 分析未完成</h3>
+      <div>${esc(st.error)}</div>
+      <div class="ana-note">常见原因：数据库还没有消息（先去「导入记录」）；或 LLM 不可用（可改用「离线分析」）。</div></div>`;
+  } else if (st.cancelled) {
+    box.innerHTML = `<div class="ana-result"><h3 class="bad">■ 已中止</h3>
+      <div>分析产物可能不完整，重新分析即可覆盖。</div></div>`;
+  } else {
+    const r = st.last_result || {};
+    const kv = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+    box.innerHTML = `<div class="ana-result"><h3 class="ok">✓ 分析完成（${(st.elapsed_s || 0).toFixed(1)}s）</h3>
+      <div class="imp-kv">
+        ${kv("事件", `${r.events ?? 0} 条`)}
+        ${kv("记忆", `${r.facts ?? 0} 条`)}
+        ${kv("关系状态", `${r.rel_months ?? 0} 个月`)}
+        ${kv("转折点", `${r.turning_points ?? 0} 个`)}
+        ${kv("人格档案", r.persona === "llm" ? "LLM 生成" : "手写模板（可自行填充）")}
+      </div>
+      <div class="form-row" style="margin-top:10px">
+        <button class="btn btn-sm" id="anaSeePersona">查看人物档案</button>
+      </div></div>`;
+    const b = $("#anaSeePersona");
+    if (b) b.onclick = () => { closeAna(); openPersona(); };
+  }
+  $("#anaCancel").style.display = "none";
+  $("#anaFinish").disabled = false;
+}
+
+function closeAna() { $("#anaModal").classList.remove("open"); }
+
+function onAnalyzeFinished(st) {
+  renderAnaProgress(st);
+  renderAnaResult(st);
+  syncActionButtons();
+  if (st.error) { toast("分析未完成：" + st.error.slice(0, 80)); return; }
+  if (st.cancelled) { toast("分析已中止"); return; }
+  toast("分析完成");
+  loadProfiles();
+  refresh();                                   // 关系状态/时间轴数据已变
+}
+
+/* 轮询：一份状态给进度面板，一份健康检查给按钮置灰 */
+function startPolling() {
+  if (V3.timer) return;
+  V3.timer = setInterval(tick, 2000);
+}
+
+async function tick() {
+  try {
+    const st = await api("/api/analyze/status");
+    const was = !!(V3.analyze && V3.analyze.running);
+    V3.analyze = st;
+    if ($("#anaModal").classList.contains("open") && (st.running || was)) {
+      renderAnaProgress(st);
+      if (st.running) $("#anaMsg").textContent = st.message || "处理中…";
+    }
+    if (was && !st.running) onAnalyzeFinished(st);
+    if (!was && st.running && $("#anaModal").classList.contains("open")) renderAnaProgress(st);
+  } catch (e) { /* 忽略瞬时错误 */ }
+  try {
+    const h = await api("/api/health");
+    V3.busy = h.busy || "";
+    if (h.profile && !V3.active) V3.active = h.profile;
+  } catch (e) { }
+  syncActionButtons();
+}
+
+/* ---------------------------------------------------------------- 人物档案 */
+async function openPersona() {
+  $("#perModal").classList.add("open");
+  $("#perBody").innerHTML = "加载中…";
+  try {
+    const d = await api("/api/persona");
+    renderPersona(d);
+  } catch (e) {
+    $("#perBody").innerHTML = `<div class="per-empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+const LAYER_KEYS = ["L", "M", "S", "U"];
+
+function renderPersona(d) {
+  $("#perWho").textContent = "· " + V3.curName();
+  const st = d.stats || {};
+  const meta = d.layer_meta || {};
+  let h = "";
+
+  h += `<div class="per-sec-title">数据概览 <small>来自当前好友的数据目录</small></div>
+    <div class="per-stats">
+      <div class="per-stat"><b>${st.n_messages ?? 0}</b><span>真实消息</span></div>
+      <div class="per-stat"><b>${st.n_events ?? 0}</b><span>抽取事件</span></div>
+      <div class="per-stat"><b>${st.n_facts ?? 0}</b><span>记忆条目</span></div>
+      <div class="per-stat"><b>${st.rel_months ?? 0}</b><span>关系状态月数</span></div>
+      <div class="per-stat"><b>${st.n_turning_points ?? 0}</b><span>转折点</span></div>
+      <div class="per-stat"><b>${esc(st.first_day || "—")}</b><span>最早消息</span></div>
+      <div class="per-stat"><b>${esc(st.last_day || "—")}</b><span>最晚消息</span></div>
+    </div>`;
+
+  if (d.empty_templates && d.empty_templates.length) {
+    h += `<div class="ana-note">人格档案 ${d.empty_templates.join(" / ")} 还是空模板：
+      编辑 <code>${esc(d.persona_dir)}/persona_v1_${esc(d.empty_templates[0])}.json</code>
+      填写各层条目，或改用 LLM 路径重新分析。</div>`;
+  }
+
+  h += `<div class="per-sec-title">人格档案 <small>L/M/S/U 四层 · 由记录推导，可手写校准</small></div>
+    <div class="per-grid">`;
+  for (const [person, p] of Object.entries(d.people || {})) {
+    h += `<div class="per-person"><header>
+        <b>${esc(p.display_name || person)}</b>
+        <span class="who">${person === "A" ? "你（用户本人）" : "对方（数字人格）"}</span>
+        ${p.has_file ? "" : '<span class="fb-tag">文件缺失</span>'}
+      </header>`;
+    for (const lk of LAYER_KEYS) {
+      const m = meta[lk] || {};
+      const items = (p.layers || {})[lk] || [];
+      h += `<div class="per-layer">
+        <div class="per-lh">${esc(m.label || lk)}<span class="tone">${esc(lk)}层 · ${esc(m.tone || "")}</span>
+          <span class="hint">${esc(m.hint || "")}</span></div>`;
+      h += items.length
+        ? items.map(it => `<div class="per-li"><span class="lb">${esc(it.label || "·")}</span><span>${esc(it.item)}</span></div>`).join("")
+        : `<div class="per-empty">未填写</div>`;
+      h += `</div>`;
+    }
+    h += `</div>`;
+  }
+  h += `</div>`;
+
+  const rc = d.rel_current;
+  h += `<div class="per-sec-title">关系状态（五维估计量） <small>模拟估计量 · 非事实</small></div>`;
+  if (rc) {
+    h += `<div class="per-rel">`;
+    for (const [k, label] of DIMS) {
+      const v = rc[k] == null ? 0 : rc[k];
+      h += `<div class="per-rel-row"><span>${label}</span>
+        <span class="bar"><i style="width:${Math.min(100, v * 10)}%"></i></span><b>${v}</b></div>`;
+    }
+    h += `<div class="ana-note">截至 ${esc(rc.period)}（置信度 ${rc.confidence ?? "—"}）</div></div>`;
+    const trend = (d.rel || []).slice(-14);
+    if (trend.length) {
+      h += `<div class="per-trend"><table class="per-tb"><thead><tr>
+        <th>月份</th><th>亲密</th><th>冲突</th><th>信任</th><th>情绪安全</th><th>沟通</th></tr></thead><tbody>`;
+      for (const r of trend) {
+        h += `<tr><td>${esc(r.period)}</td><td>${r.closeness}</td><td>${r.conflict}</td>
+          <td>${r.trust}</td><td>${r.emotional_safety}</td><td>${r.comm_quality}</td></tr>`;
+      }
+      h += `</tbody></table></div>`;
+    }
+  } else {
+    h += `<div class="per-empty">还没有关系状态数据，先跑一次「分析」。</div>`;
+  }
+
+  h += `<div class="per-sec-title">转折点 <small>断联窗口 / 重要事件 / 活跃高峰</small></div>`;
+  const tps = d.turning_points || [];
+  h += tps.length
+    ? tps.map(t => `<div class="per-tp"><div class="hd">
+         <span class="day">${esc(t.day || "")}</span>
+         <span class="tl-b ${esc(t.tone || "plain")}">${esc(t.type_label || "")}</span>
+         <span>${esc(t.title || "")}</span></div>
+         <div class="ds">${esc(t.desc || "")}</div></div>`).join("")
+    : `<div class="per-empty">还没有转折点数据，先跑一次「分析」。</div>`;
+
+  $("#perBody").innerHTML = h;
+}
+
+/* ---------------------------------------------------------------- LLM 设置 */
+function setRes(kind, text) {
+  const el = $("#setResult");
+  el.className = "set-result on" + (kind ? " " + kind : "");
+  el.textContent = text || "";
+}
+
+function applySettingsView(d) {
+  if (d.providers) {
+    $("#setProvider").innerHTML = d.providers.map(p =>
+      `<option value="${esc(p.value)}">${esc(p.label)}</option>`).join("");
+  }
+  if (d.provider) $("#setProvider").value = d.provider;
+  $("#setBaseUrl").value = d.base_url || "";
+  $("#setModel").value = d.model || "";
+  $("#setKey").placeholder = d.key_state === "set"
+    ? `已保存：${d.key_hint}（留空 = 不修改）`
+    : "尚未设置（保存后写入系统凭据管理器）";
+  const backend = { credential: "Windows 凭据管理器", "dpapi-file": "DPAPI 加密文件" }[d.key_backend]
+    || "（未保存）";
+  $("#setKeyState").innerHTML =
+    `密钥状态：<b>${d.key_state === "set" ? "已设置" : "未设置"}</b>` +
+    (d.key_state === "set" ? `　存放位置：${backend}` : "") +
+    `　环境变量：<code>${esc(d.api_key_env || "")}</code>` +
+    (d.keyring_available === false ? "　（keyring 不可用，已回退 DPAPI 文件）" : "");
+}
+
+async function openSettings() {
+  $("#setModal").classList.add("open");
+  setRes("", "");
+  try {
+    applySettingsView(await api("/api/settings"));
+  } catch (e) { setRes("bad", "读取设置失败：" + e.message); }
+}
+
+async function saveSettings(andTest) {
+  const body = {
+    provider: $("#setProvider").value,
+    base_url: $("#setBaseUrl").value.trim(),
+    model: $("#setModel").value.trim(),
+  };
+  const key = $("#setKey").value;
+  if (key) body.api_key = key;
+  setRes("wait", "保存中…");
+  try {
+    const d = await api("/api/settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    $("#setKey").value = "";
+    applySettingsView(d);
+    if (andTest) { await testSettings(); return; }
+    setRes("ok", "✓ 已保存" + (d.message ? "；" + d.message : ""));
+    toast("设置已保存");
+  } catch (e) { setRes("bad", "✕ " + e.message); }
+}
+
+async function testSettings() {
+  setRes("wait", "正在用当前配置发一次最小请求（最多 10 秒）…");
+  try {
+    const d = await api("/api/settings/test", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    setRes(d.ok ? "ok" : "bad",
+      (d.ok ? "✓ " : "✕ ") + (d.message || "") +
+      (d.latency_ms != null ? `　（${d.latency_ms} ms）` : ""));
+  } catch (e) { setRes("bad", "✕ 测试失败：" + e.message); }
+}
+
+async function clearKey() {
+  if (!confirm("清除已保存的 API Key？清除后需要重新填写才能发消息。")) return;
+  try {
+    const d = await api("/api/settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: "" }),
+    });
+    applySettingsView(d);
+    setRes("ok", "✓ " + (d.message || "已清除"));
+    toast("已清除密钥");
+  } catch (e) { setRes("bad", "✕ " + e.message); }
+}
+
+/* ---------------------------------------------------------------- 首次运行引导 */
+async function checkOnboarding() {
+  if (sessionStorage.getItem("ifwe_onb_skip") === "1") return;
+  try {
+    const d = await api("/api/onboarding");
+    V3.onboarded = true;
+    if (!d.fresh) return;
+    $("#onbHint").innerHTML = d.demo_ready
+      ? "示例数据已就绪，可直接进入。"
+      : "不会导入任何真实数据；示例为纯虚构对话。";
+    $("#onb").classList.add("open");
+  } catch (e) { }
+}
+
+async function doDemo() {
+  const opt = $('.onb-opt[data-act="demo"]');
+  opt.classList.add("busy");
+  $("#onbHint").textContent = "正在构建示例库（导入 → 离线分析 → 装载示例人格）…";
+  try {
+    const d = await api("/api/onboarding/demo", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    $("#onb").classList.remove("open");
+    await loadProfiles();
+    S.anchors = null;
+    await refresh();
+    const s = d.summary || {};
+    toast(`示例好友已就绪：${s.message_count ?? 0} 条虚构消息`);
+  } catch (e) {
+    $("#onbHint").textContent = "构建失败：" + e.message;
+  } finally {
+    opt.classList.remove("busy");
+  }
+}
+
+/* ---------------------------------------------------------------- 事件绑定 */
+$("#fbHead").onclick = () => {
+  const b = $("#fbBody");
+  const open = b.classList.toggle("open");
+  $("#fbCaret").textContent = open ? "▴" : "▾";
+  V3.fbTouched = true;
+};
+$("#btnAnalyze").onclick = () => openAnalyze(false);
+$("#btnPersona").onclick = openPersona;
+$("#btnSettings").onclick = openSettings;
+$("#anaClose").onclick = closeAna;
+$("#anaModal").onclick = e => { if (e.target.id === "anaModal") closeAna(); };
+$("#anaSkip").onchange = renderAnaHint;
+$("#anaStart").onclick = startAnalyze;
+$("#anaCancel").onclick = cancelAnalyze;
+$("#anaFinish").onclick = () => { closeAna(); refresh(); };
+$("#perClose").onclick = () => $("#perModal").classList.remove("open");
+$("#perModal").onclick = e => { if (e.target.id === "perModal") $("#perModal").classList.remove("open"); };
+$("#setClose").onclick = () => $("#setModal").classList.remove("open");
+$("#setModal").onclick = e => { if (e.target.id === "setModal") $("#setModal").classList.remove("open"); };
+$("#setSave").onclick = () => saveSettings(false);
+$("#setTest").onclick = () => saveSettings(true);
+$("#setClear").onclick = clearKey;
+$("#frdClose").onclick = () => $("#frdModal").classList.remove("open");
+$("#frdModal").onclick = e => { if (e.target.id === "frdModal") $("#frdModal").classList.remove("open"); };
+$("#frdOK").onclick = submitFriend;
+$("#frdName").addEventListener("keydown", e => { if (e.key === "Enter") submitFriend(); });
+$("#onbSkip").onclick = () => { sessionStorage.setItem("ifwe_onb_skip", "1"); $("#onb").classList.remove("open"); };
+$$(".onb-opt").forEach(o => o.onclick = () => {
+  const act = o.dataset.act;
+  if (act === "demo") doDemo();
+  else if (act === "import") { $("#onb").classList.remove("open"); openImport(); }
+  else if (act === "settings") { $("#onb").classList.remove("open"); openSettings(); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  ["#anaModal", "#perModal", "#setModal", "#frdModal"].forEach(s => $(s).classList.remove("open"));
+});
+
 /* ---------------------------------------------------------------- 启动 */
 (async () => {
   try {
     const h = await api("/api/health");
-    if (!h.key) toast("未检测到 LLM API Key（环境变量 " + (h.key_env || "LLM_API_KEY") + "）：可以浏览，但发消息会失败");
+    V3.busy = h.busy || "";
+    if (!h.key) toast("未检测到 LLM API Key：可以浏览与分析（离线），发消息需要在「设置」中配置");
   } catch (e) { }
+  await loadProfiles();
   try { await refresh(); } catch (e) { toast("加载失败：" + e.message); }
+  startPolling();
+  tick();
+  checkOnboarding();
   if (location.hash === "#new") openModal();
   if (location.hash === "#new-past") { openModal(); switchPane("past"); }
 })();

@@ -8,24 +8,47 @@ IfWe 的目标是把「关系回溯 + 反事实推演」做成一个本地可跑
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ T4 产品层    phase15_web（原生 HTML/CSS/JS 单页）                    │
-│              run.py（init/analyze/server/demo 一键入口）             │
+│              desktop.py（uvicorn + pywebview 原生窗口 / IfWe.exe）    │
+│              run.py（init/analyze/server/demo/desktop/profile/key）  │
 ├────────────────────────────────────────────────────────────────────┤
 │ T3 服务层    phase15_api（FastAPI，仅 127.0.0.1）                    │
 │              /api/state /api/anchors /api/history /api/recall        │
 │              /api/lines /api/say /api/day /api/media                │
+│              /api/analyze[/status|/cancel] /api/persona              │
+│              /api/settings[/test] /api/profiles[/switch|/rename]     │
+│              /api/onboarding[/demo] /api/import/{upload,preview,     │
+│              commit}                                                │
 ├────────────────────────────────────────────────────────────────────┤
 │ T2 内核层    DialEngine（对话内核：消息驱动 + 自动跨天）              │
 │              PersonaAgent（人格-情绪-媒介抽样-去重护栏）              │
 │              MemoryRetriever（SQL+可选向量，双时态 as_of）            │
 │              RelEngine（关系五维：事件增量+回声+稳态回归）            │
+│              analyze_pipeline（五类产物，带 progress/cancel 回调）    │
 ├────────────────────────────────────────────────────────────────────┤
 │ T1 数据层    SQLite 单文件库（WAL）                                   │
 │              主库: messages/sessions/events/facts/relationship_state  │
 │              隔离: sim_* 命名空间（推演专用，主库只读）                │
+│              profile: 每个好友一个独立数据目录（data/profiles/<id>/）  │
+│              密钥: Windows 凭据管理器 / DPAPI 文件（不落明文）         │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 关键设计
+
+### 0. 多好友隔离：为什么是「一个好友一个数据目录」
+
+隔离方案上有两条路：给每张表加 `friend_id` 维度，或让每个好友独占一套数据目录。
+本项目选了后者（v0.3），理由是：
+
+- **复用既有机制**：`config.paths.data_dir` 早已支持按目录切换（`IFWE_DATA_DIR`
+  在 demo 场景验证过）；把「好友」映射成「数据目录」后，
+  `data_dir()/db_path()/persona_dir()/cache_dir()` 无需改动即随好友切换；
+- **隔离最彻底**：库、人格档案、表情包目录、检索缓存、对话线全部物理分离，
+  不存在「查询漏了 `friend_id` 过滤」这类串扰风险；
+- **零迁移成本**：不改表结构、不改查询；老数据整体搬进 `data/profiles/default/` 即可。
+
+代价是跨好友的聚合查询（例如「所有好友的消息总数」）需要逐个目录开库——对一个
+单机单人使用的工具来说，这个代价可以接受。
 
 ### 1. 双层记忆
 

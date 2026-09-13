@@ -65,18 +65,40 @@ IfWe 是一个**本地优先**的关系时间线工具：
 | 🕰 时间轴选点 | 逐月消息量、关系五维状态、转折点（断联/事件/活跃高峰）一目了然 |
 | 🔀 IF 线改写 | 从任意一天切入 + 一句话改写，数字人格会「把改写当作已发生的事实」展开互动 |
 | 🖼 真实表情包 | 对方真实用过的表情包按频率加权复现（配置本地表情包目录即可） |
+| 🖥 图形化全流程 | 导入 → 分析（带阶段进度、可中止）→ 人物档案 → 对话，全程不用命令行 |
+| 👥 多好友隔离 | 每个好友一个独立数据目录（库 / 人格档案 / 表情包 / 对话线），互不可见、可随时切换 |
+| 🔐 密钥不落明文 | 界面里填的 API Key 存进 Windows 凭据管理器（不可用时回退当前用户 DPAPI 加密文件），永不写进 config.yaml |
 | 🔒 本地优先 | 对话、分析、数据库全部在本地 SQLite；只有「生成回复」会把脱敏上下文发给你自己配置的 LLM API |
 | 🧹 导入即脱敏 | 手机号/地址/证件号/银行卡等在入库时自动替换为占位符，脱敏文本是后续分析的唯一输入 |
 | 🛡 隐私扫描门禁 | 内置 `check_privacy.py`：扫描代码与文档中的隐私残留，非零命中即拒绝发布（可挂 CI） |
 
-## 3 步开始
+## 下载即用（Windows）
+
+不想碰命令行？下载 `IfWe-win64.zip`，解压后双击 `IfWe.exe`：
+
+1. 首次启动出现引导卡，三选一：**体验示例数据**（内置虚构对话，与任何真实人物无关）、
+   **导入我的记录**、**配置 LLM**；
+2. 之后全部在界面里完成：导入 → 点「分析」（阶段进度实时可见、可中止）→
+   看「人物档案」→ 开一条线开始对话；
+3. 左侧「好友」栏可新建/切换/重命名/删除好友，每个好友的数据完全独立。
+
+几点说明：
+
+- **数据位置**：`data/` 就在 exe 同级目录，卸载 = 删掉整个文件夹；不写注册表、不写系统目录。
+- **运行环境**：Win10 1803+ / Win11（依赖 Edge WebView2 运行时，Win11 自带；缺失时自动改用默认浏览器打开）。
+- **杀软误报**：发布物为 onedir 目录、未加壳、未用 UPX；发布页附 `SHA256` 校验值。
+  若被 SmartScreen 拦截，请先核对哈希，再「更多信息 → 仍要运行」或添加信任。
+- **源码运行**：下面的「3 步开始」一直是官方支持的方式；桌面窗口也可用
+  `python run.py desktop`（需要 `pip install pywebview`，不装则用默认浏览器打开）。
+
+## 3 步开始（源码运行）
 
 ```bash
 # 0) 安装（Python >= 3.10）
 pip install -r requirements.txt
 
 # 1) 不导入任何真实数据，先用虚构示例体验完整界面
-python run.py demo
+python run.py demo               # 或用桌面窗口: python run.py desktop
 
 # 2) 准备好你自己的数据后：生成配置 → 导入 → 分析
 python run.py init
@@ -87,7 +109,29 @@ python run.py analyze            # 无 API Key 可用 python run.py analyze --sk
 python run.py server             # → http://127.0.0.1:8015
 ```
 
+界面里也能把 2、3 步点完：左侧「导入记录」→ 导入向导，顶部「分析」→ 进度面板，
+右侧「设置」→ 填 provider / base_url / model / key 并一键测试连接。
+每个好友的数据独立存放，切换见左侧「好友」栏（命令行等价位：`run.py profile`）。
+
 详细步骤、数据格式与常见问题见 [docs/QUICKSTART.md](docs/QUICKSTART.md) 与 [docs/IMPORT.md](docs/IMPORT.md)。
+
+## 打包发布物（可选）
+
+```bash
+pip install pyinstaller pywebview keyring
+pyinstaller IfWe.spec --noconfirm     # 产物：dist/IfWe/IfWe.exe（onedir）
+```
+
+打包清单写在 `IfWe.spec`（静态资源、示例数据、图标都在版本管理内）。
+发布前请按 PRIVACY.md 的检查清单跑 `python scripts/check_privacy.py`，并确认发布目录里没有 `data/`。
+
+发布清单（建议逐项过一遍）：
+
+1. `python scripts/check_privacy.py` 零命中；`python -m unittest discover -s tests` 全绿；
+2. 发布树里不含 `data/`、`data_demo/`、`config.yaml`、`*.db`；
+3. 生成 `IfWe-win64.zip` 并附 `SHA256` 校验值；
+4. 若杀软/SmartScreen 误报：走微软误报提交渠道申诉，并在发布说明里给出
+   「添加信任」步骤（见本文「下载即用」一节），不要建议用户直接关闭防护。
 
 ## 一个诚实的边界
 
@@ -108,6 +152,9 @@ TA 是你记忆的回声，是模型对共同过去的即兴创作。请不要�
 - **数据不出本机**：`data/` 永远被 gitignore；私有内容（聊天记录、persona）与代码彻底分离。
 - **脱敏边界**：发给 LLM 的只有 `content_clean`（去噪+脱敏后的文本）与派生结论，从不发送原始记录。
 - **模拟隔离**：所有对话推演写入 `sim_*` 命名空间，主库只读——推演永不污染你的真实历史。
+- **好友隔离**：每个好友一个独立数据目录（`data/profiles/<id>/`），切换好友即切换整个数据上下文。
+- **密钥不落明文**：界面填写的 API Key 存进 Windows 凭据管理器（服务名 `IfWe`）；不可用时回退
+  当前 Windows 用户专属的 DPAPI 加密文件；`config.yaml` 与 `data/` 里都不会出现明文密钥。
 - **自查工具**：`python scripts/check_privacy.py` 用红线词表扫描整个仓库，命中即非零退出。
 - 详见 [PRIVACY.md](PRIVACY.md)。
 
@@ -119,8 +166,21 @@ chat JSONL ──► Phase1 导入/脱敏 ──► analyze(事件/记忆/状态
                                         ▼
               本地 Web UI ◄──► Phase15 对话服务 ◄──► DialEngine 对话内核
               (127.0.0.1)          (FastAPI)             │
-                                                        ▼
-                                     PersonaAgent(B) + 记忆检索 + 关系引擎(Phase6)
+                                        │               ▼
+                      desktop.py / IfWe.exe      PersonaAgent(B) + 记忆检索 + 关系引擎(Phase6)
+                      (pywebview 窗口)
+```
+
+数据目录布局（多好友）：
+
+```
+data/
+├── profiles.json            # 好友注册表（id / 名字 / 数据目录 / 上次使用）
+└── profiles/
+    └── <id>/                # 每个好友一整套：库 / persona / 缓存 / 表情包配置
+        ├── ifwe_v1.db
+        ├── persona/persona_v1_A.json
+        └── profile.yaml     # 可选：好友级配置覆盖全局 config.yaml
 ```
 
 技术选型与取舍（为什么自研记忆而不是 Graphiti、为什么 SQLite 而不是图数据库）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
@@ -128,22 +188,25 @@ chat JSONL ──► Phase1 导入/脱敏 ──► analyze(事件/记忆/状态
 ## 配置速览
 
 复制 `config.example.yaml` 为 `config.yaml` 后按需修改：双方显示名、聊天记录路径、
-LLM 提供商与模型、表情包目录、模拟参数等。**密钥只放环境变量**（`LLM_API_KEY`，
-可用配置改名），任何 OpenAI 兼容端点均可（DeepSeek / GLM / 本地推理等）。
+LLM 提供商与模型、表情包目录、模拟参数等。**密钥不要再放环境变量里也行**——
+界面「设置」面板会把它写进系统凭据管理器；环境变量（`LLM_API_KEY`，可用配置改名）
+仍然优先，方便 CI 或临时覆盖。任何 OpenAI 兼容端点均可（DeepSeek / GLM / 本地推理等）。
 
 ## 使用前必读
 
 - [DISCLAIMER.md](DISCLAIMER.md) —— 非心理治疗、非预测、生成内容不代表真实他人意愿；
   如果你正处于情绪危机，请使用文档内列出的求助资源。
-- [PRIVACY.md](PRIVACY.md) —— 数据流、脱敏边界、LLM 发送范围。
+- [PRIVACY.md](PRIVACY.md) —— 数据流、脱敏边界、密钥存放位置、LLM 发送范围。
 - **严禁**将本工具用于跟踪、骚扰或监控真实他人；你须对导入数据的合法性负责。
 
 ## 路线图
 
 - [x] v0.2 导入格式扩展（WeChatMsg、Telegram、doctor 体检、Web 向导）
-- [ ] v0.3 研究指标脚本开放（敏感性/打分/评测——本次为控制范围未随 v0.1 发布）
-- [ ] 人格档案手动编辑器（Web 表单）
-- [ ] 关系五维状态可视化面板（原研究模块产品化）
+- [x] v0.3 图形化全流程（界面内分析 + 进度、人物档案、LLM 设置面板、首次运行引导）
+- [x] v0.3 多好友隔离（每好友一个数据目录，注册表 + 切换/删除/重命名）
+- [x] v0.3 Windows 开箱即用（pywebview 桌面壳 + PyInstaller 打包清单）
+- [ ] 人格档案手动编辑器（当前为只读展示；填写仍走 persona JSON）
+- [ ] 研究指标脚本开放（敏感性/打分/评测——本次为控制范围未随 v0.1 发布）
 - [ ] 完整版分析流水线（v0.1 为简化版：启发式/单轮 LLM 抽取）
 
 ## License

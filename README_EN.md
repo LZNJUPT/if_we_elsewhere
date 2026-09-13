@@ -80,8 +80,27 @@ IfWe is a **local-first** relationship timeline tool:
 | 🔀 IF-branch rewrite | Jump to any day + rewrite one sentence; the persona treats the rewrite as fact and carries on |
 | 🖼 Real stickers | The partner's actual stickers are replayed weighted by usage frequency (point `media.emojis_dir` at your export folder) |
 | 🔒 Local-first | Chats, analysis and the database all live in local SQLite; only reply generation sends sanitized context to *your own* LLM API |
+| 🖥 Fully graphical | Import → analyze (stage-by-stage progress, cancellable) → persona viewer → chat, no command line needed |
+| 👥 Multi-friend isolation | One data directory per friend (database / persona / stickers / conversations); fully separate, switchable any time |
+| 🔐 Keys never in plaintext | API keys entered in the UI go to the Windows Credential Manager (DPAPI-encrypted file as fallback) — never into `config.yaml` |
 | 🧹 Sanitize on import | Phone numbers / addresses / IDs / bank cards are replaced with placeholders at import time; sanitized text is the only input for later stages |
 | 🛡 Privacy gate | Built-in `check_privacy.py`: scans the repo for privacy residue, exits non-zero on any hit (CI-ready) |
+
+## Download & run (Windows)
+
+Prefer no command line? Download `IfWe-win64.zip`, unzip and double-click `IfWe.exe`:
+
+1. First launch shows an onboarding card — **sample data** (fictional, unrelated to any
+   real person) / **import my logs** / **configure the LLM**;
+2. Everything else happens in the UI: import → "分析" (analyze, with live stage progress
+   and a cancel button) → persona viewer → start a conversation thread;
+3. The left "friends" panel lets you create / switch / rename / delete friends — every
+   friend owns a completely separate data directory.
+
+Notes: `data/` sits next to the exe (uninstall = delete the folder; no registry writes);
+Windows 10 1803+ / Windows 11 with the Edge WebView2 runtime (falls back to your default
+browser when unavailable); builds are onedir, unpacked, no UPX, and each release lists a
+`SHA256` value — verify it before allowing a SmartScreen prompt.
 
 ## Quick start in 3 steps
 
@@ -128,6 +147,11 @@ and our ethics guide is explicit about not hiding from real life inside replays.
   conclusions are ever sent to the LLM — never raw logs.
 - **Simulation isolation**: every "what-if" conversation lives in a `sim_*` namespace;
   the main database is read-only to the simulator.
+- **Friend isolation**: one data directory per friend (`data/profiles/<id>/`), so
+  switching friends switches the whole data context.
+- **No plaintext keys**: UI-entered API keys go to the Windows Credential Manager
+  (service `IfWe`), with a current-user DPAPI-encrypted file as fallback; `config.yaml`,
+  logs and every API response stay key-free (`GET /api/settings` returns `sk-***abc` only).
 - **Self-audit**: `python scripts/check_privacy.py` scans the whole repo against a
   red-line word list and exits non-zero on any hit.
 - See [PRIVACY_EN.md](PRIVACY_EN.md).
@@ -150,9 +174,21 @@ database — see [docs/ARCHITECTURE_EN.md](docs/ARCHITECTURE_EN.md).
 ## Configuration
 
 Copy `config.example.yaml` to `config.yaml` and edit: display names, chat source path,
-LLM provider/model, sticker folder, simulation parameters. **API keys live in
-environment variables only** (`LLM_API_KEY` by default); any OpenAI-compatible
-endpoint works (DeepSeek / GLM / local inference).
+LLM provider/model, sticker folder, simulation parameters. API keys can be set either in
+the in-app **Settings** panel (stored in the Windows Credential Manager) or via the
+environment variable (`LLM_API_KEY` by default, which takes precedence); any
+OpenAI-compatible endpoint works (DeepSeek / GLM / local inference).
+
+## Packaging a release (optional)
+
+```bash
+pip install pyinstaller pywebview keyring
+pyinstaller IfWe.spec --noconfirm     # → dist/IfWe/IfWe.exe  (onedir)
+```
+
+The bundle manifest lives in `IfWe.spec` (static assets, sample data, icon — all
+version-controlled). Before publishing, run `python scripts/check_privacy.py` and make
+sure no `data/` directory is present in the release tree.
 
 ## Read before use
 
@@ -166,9 +202,11 @@ endpoint works (DeepSeek / GLM / local inference).
 ## Roadmap
 
 - [x] v0.2 more import formats (WeChatMsg, Telegram, import doctor, web wizard)
+- [x] v0.3 fully graphical flow (in-app analyze + progress, persona viewer, LLM settings, onboarding)
+- [x] v0.3 multi-friend isolation (one data directory per friend, registry, switch/delete/rename)
+- [x] v0.3 out-of-the-box Windows (pywebview shell + PyInstaller spec)
+- [ ] Web form **editor** for persona files (v0.3 ships a read-only viewer)
 - [ ] v0.3 research-metric scripts (sensitivity / scoring / evaluation — out of v0.1 scope)
-- [ ] Web form editor for persona files
-- [ ] Relationship-state visualization panel (productized research module)
 - [ ] Full analysis pipeline (v0.1 ships a simplified one)
 
 ## License

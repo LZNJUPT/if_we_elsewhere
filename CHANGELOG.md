@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.3.0 (2026-09，草稿)
+
+主题：**从「命令行工具」变成「开箱即用的本地 Windows 应用」**——双击启动、全图形化操作、
+多好友隔离，同时不破坏既有隐私设计（CLI 全部保留，GUI 是增量入口）。
+
+### 新增
+
+- **界面内分析（替代 CLI `analyze`）**：顶栏「分析」→ 勾选是否离线 → 阶段进度面板
+  （1 准备 / 2 事件 / 3 记忆 / 4 关系状态 / 5 转折点 / 6 人格档案 + 当前消息 + 已用时），
+  支持中途中止；完成后一键跳到人物档案。
+  后端：`POST /api/analyze`、`GET /api/analyze/status`、`POST /api/analyze/cancel`；
+  `analyze_pipeline.run_all()` 新增 `progress` / `should_cancel` 回调（原有 `[2]~[6]`
+  print 与 CLI 输出保持不变）。
+- **人物档案（只读）**：`GET /api/persona` + 界面「人物档案」——数据概览、
+  双人 L/M/S/U 四层档案（空模板会给填写指引）、关系五维当前值与近 14 个月趋势、
+  转折点列表。全部来自已有产物，无新计算。
+- **LLM 设置面板**：`GET/PUT /api/settings`、`POST /api/settings/test`；
+  provider / base_url / model / max_tokens 定向写回 `config.yaml`（逐行最小替换，注释保留；
+  结构对不上才回退整体重写），改完立即生效（刷新 LLM 端点 + 失效引擎缓存）。
+- **密钥不落明文**：新增 `app/secret_store.py`——优先 `keyring`（Windows 凭据管理器，
+  服务名 `IfWe`），不可用时回退**当前 Windows 用户 DPAPI 加密文件**；
+  `GET /api/settings` 只回 `key_hint`（如 `sk-***abc`），任何响应都不含完整 key；
+  清除后发消息回到「缺少 LLM API Key」提示。
+- **多好友（profile）**：每个好友一个独立数据目录 `data/profiles/<id>/`
+  （库 / persona / 缓存 / 对话线全隔离，**零表结构改动**，复用 `IFWE_DATA_DIR` 机制）。
+  注册表 `data/profiles.json`；`GET/POST/DELETE /api/profiles` +
+  `POST /api/profiles/switch` + `POST /api/profiles/<id>/rename`；
+  界面左侧好友栏（新建 / 切换 / 重命名 / 删除 + 当前好友名常显）。
+  可选好友级配置 `data/profiles/<id>/profile.yaml`（覆盖全局 config.yaml）。
+- **老用户自动迁移**：首次启动把现有 `data/` 内容迁入 `data/profiles/default/`，
+  迁移前整目录复制备份到 `data_backup_<date>/`（已 gitignore），
+  中途失败自动回滚、原数据不受影响；`IFWE_DATA_DIR` 自定义目录不参与迁移。
+- **首次运行引导**：无 config.yaml 且无消息时显示引导卡，三选一：体验示例数据
+  （构建虚构示例库并注册为「示例好友（虚构数据）」）、导入记录、配置 LLM。
+- **全局互斥**：分析 / 导入 / 好友切换 / 好友删除共用一把互斥锁，进行中一律 409，
+  界面据此置灰「导入记录 / 分析 / 推进一天」并给出原因 tooltip。
+- **Windows 桌面壳与打包**：新增 `desktop.py`（uvicorn + pywebview 窗口，关窗优雅停服；
+  端口占用自动换口；单实例锁 + 孤儿进程清理；无 pywebview / 无 WebView2 时回退默认浏览器）
+  与 `IfWe.spec`（onedir、不加壳不用 UPX、静态资源与示例数据打包清单纳入版本管理）。
+- **CLI 等价物**：`run.py profile list|new|use|rm|migrate`、`run.py settings`、
+  `run.py key set|show|clear`、`run.py desktop`，`server`/`analyze` 新增 `--profile`。
+- **测试**：新增 `tests/test_profiles.py`（21 个用例）覆盖迁移与备份/回滚、
+  好友 CRUD 与 id 规则、`profile.yaml` 覆盖范围、`data_dir` 跟随切换、
+  删除保护、配置定向写回（注释保留）与密钥存储（强制走 DPAPI 回退，
+  不触碰真实凭据管理器）；`tests/` 全量 52 用例通过。
+
+### 变更
+
+- 数据目录解析改为「好友 profile 优先、其次全局配置」；`data_dir()/persona_dir()/cache_dir()/
+  db_path()` 在切换好友后即时生效（`phase5_common.refresh_paths()` 同步刷新下游缓存）。
+- `phase2_llm` 的 base_url/model 改为每次构造客户端时实时读取，
+  设置面板改完无需重启。
+- 导入临时目录随当前好友切换；导入向导第三页直接给出「立即分析」入口。
+- 打包（PyInstaller）时数据目录相对 exe 同级，只读资源从 `_MEIPASS` 读取。
+- `scripts/check_privacy.py` 增加目录名前缀跳过（`data_backup_*`，迁移备份里的真实数据不参与发布扫描）。
+
+### 明确未做（本期非目标）
+
+- 云同步 / 多设备 / 远程访问（仍只监听 127.0.0.1）；多用户账号体系（仍是单机单用户 + 多好友档案）。
+- 前端框架化重构（保持原生 HTML/CSS/JS、零构建）；自动更新器。
+- 人格档案**编辑器**（本期为只读展示，填写仍走 persona JSON）。
+
 ## v0.2.0 (2026-09，草稿)
 
 主题：**大幅降低"准备聊天数据"的门槛**。导入器插件架构 + 两个新来源适配 +

@@ -75,8 +75,8 @@ def _days_between(a: str, b: str) -> int:
 
 
 class MemoryRetriever:
-    def __init__(self, db_path=DB_PATH):
-        self.conn = sqlite3.connect(db_path)
+    def __init__(self, db_path=None):
+        self.conn = sqlite3.connect(db_path or cfg_mod.db_path())   # 动态：随当前好友切换
         self.conn.execute("PRAGMA busy_timeout = 10000")
         self._token_df: dict[str, int] | None = None
         self._n_docs = 0

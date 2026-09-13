@@ -11,11 +11,24 @@
 
   <aside class="side">
     <div class="side-head">
-      <div class="brand">IfWe<small>对话推演</small></div>
-      <div class="side-btns">
-        <button class="btn btn-sm" id="btnImport" title="导入聊天记录（本地，不上传任何远端）">导入记录</button>
-        <button class="btn btn-sm btn-primary" id="btnNew">＋ 新的一条线</button>
+      <div class="brand">IfWe<small>对话推演 · 本地运行</small></div>
+    </div>
+
+    <div class="fb" id="fb">
+      <div class="fb-head" id="fbHead">
+        <span class="fb-label">当前好友</span>
+        <span class="fb-cur" id="fbCur">—</span>
+        <span class="fb-caret" id="fbCaret">▾</span>
       </div>
+      <div class="fb-body" id="fbBody">
+        <div class="fb-list" id="fbList"></div>
+        <div class="fb-tip" id="fbTip">每个好友的数据完全独立（库 / 人格档案 / 表情包 / 对话线）。</div>
+      </div>
+    </div>
+
+    <div class="side-btns">
+      <button class="btn btn-sm" id="btnImport" title="导入聊天记录（本地，不上传任何远端）">导入记录</button>
+      <button class="btn btn-sm btn-primary" id="btnNew">＋ 新的一条线</button>
     </div>
     <div class="lines" id="lines"><div class="empty">还没有任何线。<br>点右上角开一条。</div></div>
     <div class="rel-panel">
@@ -32,6 +45,9 @@
       <span class="chip" id="mDay">—</span>
       <span class="chip gray" id="mMsg">—</span>
       <div class="spacer"></div>
+      <button class="btn btn-sm" id="btnPersona" title="查看分析得到的人格档案与关系数据">人物档案</button>
+      <button class="btn btn-sm btn-primary" id="btnAnalyze" title="在本机分析聊天记录（事件/记忆/关系/转折点/人格）">分析</button>
+      <button class="btn btn-sm" id="btnSettings" title="LLM 提供商、模型与密钥">设置</button>
       <button class="btn btn-sm" id="btnHist" title="显示 / 隐藏这条线开始之前的真实聊天记录">真实记录</button>
       <button class="btn btn-sm" id="btnDay">推进一天 →</button>
     </div>
@@ -142,7 +158,7 @@
           <label>会话切分阈值</label>
           <input id="impGap" type="number" min="1" max="1440" value="30" style="width:80px"> <span class="imp-sub">分钟</span>
         </div>
-        <div class="snap">⚠ 导入会全量重建数据库：现有的推演线与分析产物会被清空（persona 文件保留）。</div>
+        <div class="snap" id="impTarget">⚠ 导入会全量重建数据库：现有的推演线与分析产物会被清空（persona 文件保留）。</div>
         <div class="form-row">
           <button class="btn" id="impBack">← 重新上传</button>
           <div class="spacer"></div>
@@ -160,6 +176,159 @@
           <button class="btn btn-primary" id="impDone">完成</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ v0.3：分析任务 ============================ -->
+<div class="modal" id="anaModal">
+  <div class="modal-card ana-card">
+    <div class="modal-head">
+      <h2>分析聊天记录</h2>
+      <button class="btn btn-sm" id="anaClose">关闭</button>
+    </div>
+
+    <div class="pane active ana-pane" id="ana-pane1">
+      <div class="ana-body">
+        <div class="snap">
+          分析全部在本机完成：<b>事件抽取 → 记忆沉淀 → 关系状态 → 转折点 → 人格档案</b>。
+          产物写入当前好友的数据目录，不会上传任何原始记录。
+        </div>
+        <label class="chk">
+          <input type="checkbox" id="anaSkip">
+          <span><b>离线分析</b>（不调用 LLM）</span>
+        </label>
+        <div class="ana-note" id="anaSkipHint"></div>
+        <div class="ana-note" id="anaWho"></div>
+      </div>
+      <div class="form">
+        <div class="form-row">
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="anaStart">开始分析</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane ana-pane" id="ana-pane2">
+      <div class="ana-prog">
+        <div class="ana-status">
+          <b id="anaPhase">准备中…</b>
+          <span class="ana-time" id="anaElapsed">0.0s</span>
+        </div>
+        <ol class="ana-stages" id="anaStages"></ol>
+        <div class="ana-msg" id="anaMsg">正在启动…</div>
+      </div>
+      <div class="form">
+        <div class="form-row">
+          <button class="btn btn-danger" id="anaCancel">中止分析</button>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="anaFinish" disabled>完成</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ v0.3：人物档案 ============================ -->
+<div class="modal" id="perModal">
+  <div class="modal-card per-card">
+    <div class="modal-head">
+      <h2>人物档案<span class="per-sub" id="perWho"></span></h2>
+      <div class="spacer"></div>
+      <span class="per-note">模拟估计量 · 非事实</span>
+      <button class="btn btn-sm" id="perClose">关闭</button>
+    </div>
+    <div class="per-body" id="perBody">加载中…</div>
+  </div>
+</div>
+
+<!-- ============================ v0.3：LLM 设置 ============================ -->
+<div class="modal" id="setModal">
+  <div class="modal-card set-card">
+    <div class="modal-head">
+      <h2>LLM 设置</h2>
+      <button class="btn btn-sm" id="setClose">关闭</button>
+    </div>
+    <div class="set-body">
+      <div class="form-row">
+        <label class="set-lb">提供商</label>
+        <select id="setProvider"></select>
+      </div>
+      <div class="form-row">
+        <label class="set-lb">Base URL</label>
+        <input id="setBaseUrl" type="text" placeholder="https://api.deepseek.com">
+      </div>
+      <div class="form-row">
+        <label class="set-lb">模型</label>
+        <input id="setModel" type="text" placeholder="deepseek-chat">
+      </div>
+      <div class="form-row">
+        <label class="set-lb">API Key</label>
+        <input id="setKey" type="password" autocomplete="new-password" placeholder="留空 = 不修改">
+      </div>
+      <div class="set-state" id="setKeyState">—</div>
+      <div class="snap">
+        密钥<b>不写进 config.yaml</b>：保存在 Windows 凭据管理器（不可用时改为
+        当前 Windows 用户专属的 DPAPI 加密文件）。页面任何响应都不会回传完整密钥。
+      </div>
+      <div class="set-result" id="setResult"></div>
+    </div>
+    <div class="form">
+      <div class="form-row">
+        <button class="btn btn-danger" id="setClear">清除密钥</button>
+        <div class="spacer"></div>
+        <button class="btn" id="setTest">保存并测试连接</button>
+        <button class="btn btn-primary" id="setSave">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ v0.3：好友 ============================ -->
+<div class="modal" id="frdModal">
+  <div class="modal-card frd-card">
+    <div class="modal-head">
+      <h2 id="frdTitle">新建好友</h2>
+      <button class="btn btn-sm" id="frdClose">关闭</button>
+    </div>
+    <div class="form">
+      <div class="form-row">
+        <label>名字</label>
+        <input id="frdName" type="text" maxlength="24" placeholder="例如：小林">
+      </div>
+      <div class="snap" id="frdHint">
+        每个好友拥有完全独立的数据目录（库、人格档案、表情包、对话线），互不可见。
+      </div>
+      <div class="form-row">
+        <div class="spacer"></div>
+        <button class="btn btn-primary" id="frdOK">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ v0.3：首次运行引导 ============================ -->
+<div class="onb" id="onb">
+  <div class="onb-card">
+    <h1>IfWe · 若我们在</h1>
+    <p>本地优先：聊天记录、分析产物与对话全部留在你自己的电脑上。选一个开始方式 ——</p>
+    <div class="onb-opts">
+      <div class="onb-opt" data-act="demo">
+        <b>体验示例数据</b>
+        <span>用内置虚构对话（与任何真实人物无关）走一遍完整流程</span>
+      </div>
+      <div class="onb-opt" data-act="import">
+        <b>导入我的记录</b>
+        <span>支持 chatlab / WeChatMsg / Telegram 的导出文件</span>
+      </div>
+      <div class="onb-opt" data-act="settings">
+        <b>配置 LLM</b>
+        <span>填 Base URL / 模型 / 密钥，解锁对话推演</span>
+      </div>
+    </div>
+    <div class="onb-foot">
+      <span class="onb-hint" id="onbHint"></span>
+      <button class="btn btn-sm" id="onbSkip">先随便看看</button>
     </div>
   </div>
 </div>

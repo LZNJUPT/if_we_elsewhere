@@ -2,6 +2,8 @@
 data/
 data_demo/
 config.yaml
+# 多好友迁移时的整目录备份（含真实数据，绝不入库）
+data_backup_*/
 
 # Python
 __pycache__/
@@ -14,6 +16,11 @@ venv/
 poc/.cache_fastembed/
 poc/data/
 *.log
+
+# 打包产物（IfWe.spec 的构建输出）
+build/
+dist/
+*.manifest
 
 # AI 工作台本地目录（平台注入的本地状态，永不入库）
 .workbuddy/

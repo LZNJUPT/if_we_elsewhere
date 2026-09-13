@@ -22,10 +22,25 @@ from pydantic import BaseModel, Field
 import config as cfg_mod
 
 # OpenAI 兼容接入点：默认 DeepSeek；config llm.base_url/model 可改，
-# 环境变量 IFWE_LLM_BASE_URL / IFWE_LLM_MODEL 优先级更高
-_llm_cfg = cfg_mod.load()["llm"]
-BASE_URL = os.environ.get("IFWE_LLM_BASE_URL") or _llm_cfg["base_url"]
-MODEL = os.environ.get("IFWE_LLM_MODEL") or _llm_cfg["model"]
+# 环境变量 IFWE_LLM_BASE_URL / IFWE_LLM_MODEL 优先级更高。
+# 每次构造客户端都实时读一遍（GUI 设置面板保存后立即生效，无需重启）。
+def resolve_endpoint() -> tuple[str, str, str]:
+    """返回 (provider, base_url, model)"""
+    c = cfg_mod.load()["llm"]
+    return (str(c.get("provider") or "deepseek"),
+            os.environ.get("IFWE_LLM_BASE_URL") or str(c.get("base_url") or ""),
+            os.environ.get("IFWE_LLM_MODEL") or str(c.get("model") or ""))
+
+
+def refresh_endpoint() -> tuple[str, str, str]:
+    """刷新模块级 BASE_URL/MODEL（兼容旧调用方引用的全局量）"""
+    global BASE_URL, MODEL
+    _, BASE_URL, MODEL = resolve_endpoint()
+    return BASE_URL, MODEL
+
+
+BASE_URL = os.environ.get("IFWE_LLM_BASE_URL") or cfg_mod.load()["llm"]["base_url"]
+MODEL = os.environ.get("IFWE_LLM_MODEL") or cfg_mod.load()["llm"]["model"]
 logger = logging.getLogger("ifwe.m4")
 
 # 事件类型本体（评审稿 B3，D5 已锁定草案）
@@ -238,18 +253,20 @@ class DeepSeekRepairClient:
     def __init__(self, api_key: Optional[str] = None, max_tokens: int = 4096, max_attempts: int = 3):
         from openai import OpenAI
 
-        self.provider = _llm_cfg["provider"]        # 透传记录（provider 仅做标识/日志）
+        provider, base_url, model = resolve_endpoint()
+        self.provider = provider                        # 透传记录（provider 仅做标识/日志）
+        self.base_url = base_url
         self.api_key = api_key or cfg_mod.api_key()
         if not self.api_key:
             env_name = cfg_mod.load()["llm"]["api_key_env"]
             raise RuntimeError(f"缺少 LLM API Key（环境变量 {env_name}）")
-        self.client = OpenAI(api_key=self.api_key, base_url=BASE_URL)
-        self.model = MODEL
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self.model = model
         self.max_tokens = max_tokens
         self.max_attempts = max_attempts
         self.last_usage: Optional[dict] = None
         logger.info("LLM client: provider=%s model=%s base_url=%s",
-                    self.provider, self.model, BASE_URL)
+                    self.provider, self.model, self.base_url)
 
     def extract(self, system: str, user: str, response_model=SessionExtraction):
         """调用 + 修复 + 校验，返回 pydantic 对象"""

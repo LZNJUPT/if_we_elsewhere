@@ -22,6 +22,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Callable
 
 import config as cfg_mod
 import phase5_common as pc
@@ -33,6 +34,10 @@ SCHEMAS = ["schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
 
 # 断联判定阈值：连续 N 天无消息视为一个断联窗口（转折点标记用）
 GAP_DAYS = 14
+
+
+class AnalyzeCancelled(Exception):
+    """分析被用户中止（每个阶段之间检查一次，保证不会留下半截产物）"""
 
 
 def _apply_all_schemas(conn) -> None:
@@ -99,7 +104,9 @@ def _insert_fact(conn, day, ev: dict, eid: str) -> None:
          pc.now_str()))
 
 
-def extract_events_llm(conn, client, max_sessions: int = 0) -> int:
+def extract_events_llm(conn, client, max_sessions: int = 0,
+                       progress: Callable[[str, str], None] | None = None,
+                       should_cancel: Callable[[], bool] | None = None) -> int:
     """LLM 会话级事件抽取（phase2 SYSTEM_PROMPT + SessionSummary）"""
     from phase2_llm import SYSTEM_PROMPT, build_session_prompt
     from phase5_llm import SessionSummary
@@ -109,6 +116,8 @@ def extract_events_llm(conn, client, max_sessions: int = 0) -> int:
         groups = groups[:max_sessions]
     n = 0
     for i, g in enumerate(groups):
+        if should_cancel and should_cancel():
+            raise AnalyzeCancelled("分析已中止（事件抽取阶段）")
         texts = [m for m in g if m["subtype"] in ("text", "quote_text")
                  and m["text"].strip() and not m["privacy"]]
         if len(texts) < 2:
@@ -116,6 +125,11 @@ def extract_events_llm(conn, client, max_sessions: int = 0) -> int:
         prompt = build_session_prompt(
             {"start_ts": g[0]["ts"], "end_ts": g[-1]["ts"]}, texts)
         day = g[0]["day"]
+        if progress:
+            try:
+                progress("2", f"事件抽取：第 {i + 1}/{len(groups)} 个会话（已得 {n} 条）")
+            except Exception:
+                pass
         try:
             obj = client.extract(system=SYSTEM_PROMPT, user=prompt,
                                  response_model=SessionSummary)
@@ -380,14 +394,36 @@ def _save_persona(person: str, data: dict) -> bool:
 
 
 # ---------------------------------------------------------------- 主入口
-def run_all(skip_llm: bool = False, max_sessions: int = 0) -> dict:
+def run_all(skip_llm: bool = False, max_sessions: int = 0,
+            progress: Callable[[str, str], None] | None = None,
+            should_cancel: Callable[[], bool] | None = None) -> dict:
+    """跑完整分析管线。
+
+    progress(code, message)   —— 阶段进度回调（阶段码 1~6，GUI 进度面板用）；
+                                 原有的 [2]~[6] print 全部保留，CLI 输出不变
+    should_cancel() -> bool   —— 阶段之间检查的中止标志位（GUI「中止」按钮用）
+    """
+    def _stage(code: str, msg: str) -> None:
+        if progress:
+            try:
+                progress(code, msg)
+            except Exception:
+                pass
+
+    def _check() -> None:
+        if should_cancel and should_cancel():
+            raise AnalyzeCancelled("分析已中止")
+
     t0 = time.time()
+    _stage("1", "准备：加载配置与数据库")
+    _check()
     conn = pc.connect()
     _apply_all_schemas(conn)
     n_msgs = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     if not n_msgs:
         conn.close()
         raise SystemExit("库里还没有消息：先执行 python run.py init / python scripts/import_chat.py")
+    _stage("1", f"准备完成：待分析消息 {n_msgs} 条")
 
     # 清空旧分析产物（幂等重建）
     for t in ("events", "facts", "relationship_state", "turning_points"):
@@ -403,29 +439,42 @@ def run_all(skip_llm: bool = False, max_sessions: int = 0) -> dict:
             print(f"[warn] LLM 不可用（{str(e)[:80]}），自动切到离线路径")
             skip_llm = True
 
+    _check()
     if skip_llm:
         n_ev = extract_events_heuristic(conn)
         print(f"[2] 事件（启发式）: {n_ev} 条")
     else:
-        n_ev = extract_events_llm(conn, client, max_sessions=max_sessions)
+        n_ev = extract_events_llm(conn, client, max_sessions=max_sessions,
+                                  progress=progress, should_cancel=should_cancel)
         print(f"[2] 事件（LLM）: {n_ev} 条")
+    _stage("2", f"事件抽取完成：{n_ev} 条")
 
+    _check()
     n_facts = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
     print(f"[3] 记忆 facts: {n_facts} 条")
+    _stage("3", f"记忆沉淀完成：{n_facts} 条")
 
+    _check()
     n_rel = estimate_relationship_state(conn)
     print(f"[4] 关系状态: {n_rel} 个月（估计量）")
+    _stage("4", f"关系状态估计完成：{n_rel} 个月")
 
+    _check()
     n_tps = detect_turning_points(conn)
     print(f"[5] 转折点: {n_tps} 个（断联≥{GAP_DAYS}天 + 重要事件 + 活跃高峰）")
+    _stage("5", f"转折点检测完成：{n_tps} 个")
 
+    _check()
     persona_mode = "template" if skip_llm else "llm"
     for person in ("A", "B"):
+        _check()
+        _stage("6", f"人格档案：正在处理 {person}")
         ok = (build_persona_template(person) if skip_llm
               else build_persona_llm(conn, client, person))
         if not ok:
             build_persona_template(person)
     print(f"[6] persona: {persona_mode}（路径 {cfg_mod.persona_dir().relative_to(cfg_mod.root())}）")
+    _stage("6", f"人格档案完成：{persona_mode}")
     conn.close()
 
     summary = {"events": n_ev, "facts": n_facts, "rel_months": n_rel,

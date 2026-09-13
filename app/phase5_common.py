@@ -14,6 +14,7 @@ import json
 import random
 import re
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -23,6 +24,8 @@ from typing import Optional
 import config as cfg_mod
 
 ROOT = Path(__file__).resolve().parent.parent          # 项目根（app/ 的上一级）
+
+# 以下路径/显示名在导入时取一次（兼容旧调用方）；切换好友或改配置后请调 refresh_paths()
 DATA_DIR = cfg_mod.data_dir()
 DB_PATH = cfg_mod.db_path()
 RESULT_DIR = DATA_DIR / "phase5_results"
@@ -44,12 +47,34 @@ def now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def refresh_paths() -> None:
+    """重新解析数据目录/人格目录/显示名（切换好友、改配置后调用）。
+
+    同时把依赖本模块常量的下游模块（phase5_a2_loop / phase15_dial_engine）一起刷新，
+    避免进程内缓存与新的 profile 数据目录不一致。
+    """
+    global DATA_DIR, DB_PATH, RESULT_DIR, PERSONA_DIR, SENDER_NAME, SENDER_SHORT, DEFAULT_SEED
+    DATA_DIR = cfg_mod.data_dir()
+    DB_PATH = cfg_mod.db_path()
+    RESULT_DIR = DATA_DIR / "phase5_results"
+    PERSONA_DIR = cfg_mod.persona_dir()
+    SENDER_NAME = cfg_mod.sender_names()
+    SENDER_SHORT = {v: k for k, v in SENDER_NAME.items()}
+    DEFAULT_SEED = int(cfg_mod.load()["defaults"]["seed"])
+    a2 = sys.modules.get("phase5_a2_loop")
+    if a2 is not None:
+        a2.SENDER_NAME = SENDER_NAME
+    dial = sys.modules.get("phase15_dial_engine")
+    if dial is not None:
+        dial.AUTO_DAY_TURNS = int(cfg_mod.load()["defaults"]["auto_day_turns"])
+
+
 def new_sim_id() -> str:
     return "SIM-" + time.strftime("%Y%m%d-%H%M%S")
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(cfg_mod.db_path())        # 动态：随当前好友的数据目录切换
     conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
@@ -61,7 +86,7 @@ def apply_schema(conn: sqlite3.Connection) -> None:
 
 def load_persona_json(person: str) -> dict:
     """读 phase3 定稿 persona JSON（L/M/S/U 四层 + 快照）"""
-    with (PERSONA_DIR / f"persona_v1_{person}.json").open(encoding="utf-8") as f:
+    with (cfg_mod.persona_dir() / f"persona_v1_{person}.json").open(encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -80,7 +105,7 @@ def persona_layer_text(person: str, layer: str) -> str:
 def deliver_persona_block(person: str) -> str:
     """A2 用：组装 L/M/S/U 四层提示块（含用户主观真值 U 置顶提示）"""
     p = load_persona_json(person)
-    name = (p.get("display_name") or "").strip() or SENDER_NAME.get(person, person)
+    name = (p.get("display_name") or "").strip() or cfg_mod.sender_names().get(person, person)
     blocks = [f"你是「{name}」，以下是你的长期人格档案（派生自真实关系分析，禁止推断档案之外的细节）："]
     layer_titles = {"L": "语言风格(L层·时不变)", "M": "压力与意义(M层·中期)",
                     "S": "情绪与冲突模式(S层·动态)", "U": "自我认知(U层·用户校准真值，最优先遵守)"}
@@ -95,7 +120,7 @@ def persona_lite_block(person: str) -> str:
     """A2 每回合精简卡：风格要点(L【事实】优先) + S 冲突模式前几条 + U 层全部。
     目的：减少全量人格重复锚定（“人机感”来源之一），日常回合只提示高信号特征。"""
     p = load_persona_json(person)
-    name = (p.get("display_name") or "").strip() or SENDER_NAME.get(person, person)
+    name = (p.get("display_name") or "").strip() or cfg_mod.sender_names().get(person, person)
     def items(lk):
         return p.get("layers", {}).get(lk, {}).get("items", [])
     l_fact = [(it.get("item", ""), it.get("label", "")) for it in items("L")
@@ -271,7 +296,7 @@ def build_world(conn: sqlite3.Connection, start_day: str, *, seed: int = 0,
         divergence_point=divergence_point, divergence_desc=divergence_desc,
         rewritten_choice=rewritten_choice,
         clock=clock,
-        person_names=dict(SENDER_NAME),
+        person_names=dict(cfg_mod.sender_names()),
         persona_blocks={"A": deliver_persona_block("A"), "B": deliver_persona_block("B")},
         rel_state=rel_state_at(conn, start_day),
     )

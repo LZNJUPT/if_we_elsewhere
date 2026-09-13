@@ -1,13 +1,20 @@
-# IfWe v0.1 运行依赖（Python >= 3.10）
+# IfWe v0.3 运行依赖（Python >= 3.10）
 fastapi>=0.110,<1.0
 uvicorn>=0.29,<1.0
 pydantic>=2.6,<3.0
 openai>=1.30,<2.0
 numpy>=1.26,<3.0
 PyYAML>=6.0,<7.0
+keyring>=24,<26
 
 # 可选增强（不装也能跑，功能自动降级）：
 #   fastembed   —— 记忆检索的本地向量召回（混合检索）；缺省时自动退回纯关键词检索
 #   snownlp     —— 叙事注入的情绪打分；缺省时跳过该微调项
+#   pywebview   —— 桌面窗口（desktop.py / IfWe.spec 打包用）；缺省时用默认浏览器打开
 # fastembed>=0.3,<0.8
 # snownlp>=0.12,<0.13
+# pywebview>=5.3,<7.0
+
+# 打包（可选，仅构建发布物时需要）：pyinstaller>=6.0,<7.0
+# 说明：keyring 用于把界面填写的 LLM 密钥存进 Windows 凭据管理器；
+#      不可用或未安装时自动回退「当前用户 DPAPI 加密文件」，密钥永不落明文。

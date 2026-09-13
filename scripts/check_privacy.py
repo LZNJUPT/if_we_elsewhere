@@ -43,6 +43,8 @@ TEXT_EXTS = {".py", ".md", ".js", ".css", ".html", ".sql", ".yaml", ".yml",
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules",
              "data", "data_demo", ".cache_fastembed", "build", "dist",
              ".workbuddy"}   # v2: AI 工作台平台目录（本地状态，已 gitignore，非项目内容）
+# 跳过的目录名前缀（多好友迁移备份等：目录里是本机真实数据，不参与发布扫描）
+SKIP_PREFIXES = ("data_backup_",)
 
 
 def load_extra(path: Path | None) -> list[str]:
@@ -63,7 +65,10 @@ def iter_text_files(root: Path):
             continue
         if p.resolve() == self_path:      # 词表文件自身自排除
             continue
-        if any(part in SKIP_DIRS for part in p.relative_to(root).parts):
+        parts = p.relative_to(root).parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        if any(part.startswith(SKIP_PREFIXES) for part in parts[:-1]):
             continue
         if p.suffix.lower() not in TEXT_EXTS:
             continue
