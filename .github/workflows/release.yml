@@ -155,13 +155,16 @@ jobs:
               shutil.copy(root / "sample_data" / f"persona_v1_{p}.json",
                           data / "persona" / f"persona_v1_{p}.json")
           env = dict(os.environ, IFWE_DATA_DIR=str(data))
+          # 子进程输出现在是 UTF-8（应用已把标准流固定为 UTF-8），
+          # 父进程必须显式声明，否则 runner 会按 cp1252 解码并在读取线程里崩掉
           r = subprocess.run([sys.executable, "app/phase15_dial_engine.py", "selftest"],
-                             env=env, capture_output=True, text=True, timeout=900)
-          print(r.stdout[-3000:])
-          if r.stderr.strip():
+                             env=env, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=900)
+          print((r.stdout or "")[-3000:])
+          if (r.stderr or "").strip():
               print(r.stderr[-1500:], file=sys.stderr)
           assert r.returncode == 0, f"selftest 退出码 {r.returncode}"
-          assert "全部通过" in r.stdout, "selftest 未打印通过标记"
+          assert "全部通过" in (r.stdout or ""), "selftest 未打印通过标记"
           print("[ci] 离线自检通过 ✅（与真实数据完全隔离）")
           PY
 
