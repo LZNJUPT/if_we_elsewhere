@@ -163,7 +163,9 @@ def release_lock() -> None:
 # ---------------------------------------------------------------- 服务 / 窗口
 def start_server(port: int):
     import uvicorn
-    os.environ["PORT"] = str(port)          # phase15_api.PORT 与实际监听端口保持一致
+    import config as cfg_mod            # main() 里的是局部名，这里需要自己的引用
+    cfg_mod._safe_stdio()               # 双击启动时 sys.stdout 是 None，uvicorn 日志会崩
+    os.environ["PORT"] = str(port)      # phase15_api.PORT 与实际监听端口保持一致
     from phase15_api import app
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
                                            log_level="warning"))

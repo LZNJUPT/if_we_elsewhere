@@ -70,6 +70,12 @@
 
 ### 修复（打包链路实测发现）
 
+- **双击启动崩溃（用户实测 2026-09-13）**：窗口程序没有标准句柄，`sys.stdout/stderr` 为
+  `None`，uvicorn 日志配置调 `sys.stdout.isatty()` 直接 `AttributeError` → exe 起不来。
+  现 `config._safe_stdio()` 会安装安全接收端：优先写 `data/logs/desktop.log`
+  （用户反馈时可附带，超 512KB 自动重建），失败退回内存黑洞。
+- **启动日志句柄挡住首次迁移**：`data/logs/` 属运行期产物，迁移时跳过
+  （`logs/`、`tmp_import/`、`.ifwe.lock` 不参与搬迁），否则老用户数据迁不进默认好友。
 - **打包后只读资源定位错误**：冻结运行时模块的 `__file__` 指向 `_MEIPASS` 根，而
   schema / 静态前端 / 示例数据按 spec 放在 `_MEIPASS/app` 下 → 打包版会「导入记录」直接失败、
   人物档案 500。新增 `config.resource_dir()/sample_dir()/template_path()` 统一探测，
@@ -80,7 +86,8 @@
   `phase5_common.apply_all_schemas()` 建齐全部结构（API 首次访问某个库时执行一次，
   导入重建库后自动失效重跑；CLI 入口同样改用），`pc.connect()` 也会自动创建父目录。
 - 打包版 `data/` 首次启动迁移、`nightly` 与正式版的版本号一致性均由 CI 与冒烟步骤覆盖
-  （成品 exe 会被真的启动一次并访问 `/api/health`、`/api/persona`、`/api/onboarding`、首页）。
+  （成品 exe 会被真的启动一次并访问 `/api/health`、`/api/persona`、`/api/onboarding`、首页；
+  冒烟含两种启动方式：重定向输出 + **无标准句柄（等价双击）**）。
 
 ### 明确未做（本期非目标）
 

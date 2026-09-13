@@ -91,6 +91,32 @@ class TestMigration(ProfileBase):
         self.assertTrue(again["ok"])
         self.assertFalse(again["migrated"])
 
+    def test_migration_skips_runtime_artifacts(self):
+        """logs/ 与 .ifwe.lock 是运行期产物：不参与迁移，也不能把迁移搞失败
+        （回归：打包版双击启动会先创建 data/logs/desktop.log 并持有句柄）"""
+        self.seed_legacy_data()
+        (self.base() / "logs").mkdir(exist_ok=True)
+        (self.base() / "logs" / "desktop.log").write_text("x", encoding="utf-8")
+        (self.base() / ".ifwe.lock").write_text("1 8015", encoding="utf-8")
+        res = pmod.ensure_migrated()
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["migrated"], res)
+        self.assertNotIn("logs", res.get("moved", []))
+        self.assertNotIn(".ifwe.lock", res.get("moved", []))
+        self.assertTrue((self.base() / "logs" / "desktop.log").is_file())   # 留在原地
+        self.assertTrue((self.base() / ".ifwe.lock").is_file())
+        self.assertTrue((self.base() / "profiles" / "default" / "ifwe_v1.db").is_file())
+
+    def test_fresh_install_with_only_runtime_artifacts(self):
+        """全新安装但 data/ 里已有 logs/（打包版先建日志）：不该触发迁移也不该报错"""
+        (self.base() / "logs").mkdir(parents=True, exist_ok=True)
+        (self.base() / "logs" / "desktop.log").write_text("x", encoding="utf-8")
+        res = pmod.ensure_migrated()
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res.get("created_default"), res)
+        self.assertFalse(res["migrated"])
+        self.assertTrue((self.base() / "logs" / "desktop.log").is_file())
+
     def test_custom_data_dir_is_not_migrated(self):
         """IFWE_DATA_DIR 场景（如 run.py demo）不参与好友迁移"""
         import os
@@ -337,6 +363,39 @@ class TestSchemas(ProfileBase):
         pc.apply_all_schemas(conn)
         self.assertIsNone(pc.rel_state_at(conn, "2026-09-13"))
         conn.close()
+
+
+class TestSafeStdio(unittest.TestCase):
+    """回归：双击启动的窗口 exe 没有任何标准句柄（sys.stdout=None），
+    uvicorn 日志配置调 sys.stdout.isatty() 直接崩（2026-09-13 用户实测）。"""
+
+    def test_none_streams_replaced_by_usable_sink(self):
+        old = (sys.stdout, sys.stderr)
+        try:
+            sys.stdout = None
+            sys.stderr = None
+            cfg_mod._safe_stdio()
+            self.assertIsNotNone(sys.stdout)
+            self.assertIsNotNone(sys.stderr)
+            self.assertFalse(sys.stdout.isatty())            # uvicorn 日志初始化需要它
+            self.assertTrue(sys.stdout.writable())
+            sys.stdout.write("probe")                        # 不能抛
+            sys.stderr.write("probe")
+        finally:
+            sys.stdout, sys.stderr = old
+
+    def test_real_streams_keep_reconfigure_only(self):
+        """已有真实流（重定向场景）时只做编码固定，不替换对象。"""
+        import io
+        old = (sys.stdout, sys.stderr)
+        buf = io.StringIO()
+        try:
+            sys.stdout = buf
+            sys.stderr = buf
+            cfg_mod._safe_stdio()
+            self.assertIs(sys.stdout, buf)
+        finally:
+            sys.stdout, sys.stderr = old
 
 
 if __name__ == "__main__":

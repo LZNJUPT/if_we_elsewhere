@@ -136,6 +136,32 @@ jobs:
           finally:
               subprocess.run(["taskkill", "/PID", str(proc.pid), "/F"], capture_output=True)
               log.close()
+
+          # ---- 第二阶段：模拟「双击启动」（Windows 不给任何标准句柄，sys.stdout=None）----
+          # 曾导致 uvicorn 日志配置崩溃：'NoneType' object has no attribute 'isatty'
+          si = subprocess.STARTUPINFO()
+          si.dwFlags |= subprocess.STARTF_USESTDHANDLES          # 句柄全空 = 双击启动
+          proc2 = subprocess.Popen([str(exe), "--no-window", "--port", "8232"],
+                                   cwd=str(exe.parent), startupinfo=si, close_fds=False)
+          base2 = "http://127.0.0.1:8232"
+          h2 = None
+          try:
+              for _ in range(45):
+                  try:
+                      with urllib.request.urlopen(base2 + "/api/health", timeout=2) as r:
+                          h2 = json.loads(r.read())
+                      break
+                  except Exception:
+                      if proc2.poll() is not None:
+                          break
+                      time.sleep(1)
+              assert h2, "双击模式（无标准句柄）启动失败——见 dist/exe_smoke.log"
+              print("[ci] 双击模式（空句柄）health:", json.dumps(h2, ensure_ascii=False))
+              with urllib.request.urlopen(base2 + "/api/persona", timeout=15) as r:
+                  assert r.status == 200
+              print("[ci] 双击模式可用 ✅")
+          finally:
+              subprocess.run(["taskkill", "/PID", str(proc2.pid), "/F"], capture_output=True)
               print("--- exe 启动日志（尾部）---")
               print(Path("dist/exe_smoke.log").read_text(encoding="utf-8", errors="replace")[-1500:])
           PY

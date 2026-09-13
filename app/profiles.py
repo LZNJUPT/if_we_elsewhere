@@ -204,8 +204,11 @@ def ensure_migrated() -> dict:
 
     entries = []
     if base.exists():
-        entries = sorted((p for p in base.iterdir()
-                          if p.name not in ("profiles", BASE_NAME)), key=lambda p: p.name)
+        # 运行期产物不参与迁移：logs（启动器日志，含打开着的句柄）、tmp_import（导入临时目录）、
+        # .ifwe.lock（单实例锁）。把它们一起搬走会因句柄占用导致迁移失败（2026-09-13 实测）。
+        skip = {"profiles", BASE_NAME, "logs", "tmp_import", ".ifwe.lock"}
+        entries = sorted((p for p in base.iterdir() if p.name not in skip),
+                         key=lambda p: p.name)
     dest = cfg_mod.profiles_base() / DEFAULT_ID
 
     if not entries:                                    # 全新安装：建一个空的默认好友

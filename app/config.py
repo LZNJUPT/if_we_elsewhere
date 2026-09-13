@@ -16,6 +16,7 @@ import copy
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,23 +31,88 @@ def _resolve_root() -> Path:
 ROOT = _resolve_root()
 
 
-def _safe_stdio() -> None:
-    """把标准流固定为 UTF-8 + 宽容替换（应用级加固，在 import 时生效）。
+class _NullStream:
+    """无任何标准句柄（双击启动的窗口程序）时的内存黑洞。
 
-    不允许任何入口因为「往控制台打一行日志」而崩：
-    - 冻结 exe 的输出被重定向到非 UTF-8 管道时（runner cp1252 / 中文系统 cp936），
-      打印中文会 UnicodeEncodeError，甚至让 FastAPI lifespan 启动失败（CI run#3 实测）；
-    - 交互式控制台在 Windows 上本就走 PEP 528 的 UTF-8 通道，reconfigure 等价于无操作。
+    必须长得像个流：uvicorn 的日志 formatter 会调 sys.stdout.isatty()，
+    logging.StreamHandler 会 write/flush——缺一个就崩。
     """
+
+    encoding = "utf-8"
+    errors = "replace"
+    name = "<ifwe-null>"
+    mode = "w"
+    closed = False
+
+    def write(self, *_args, **_kwargs):
+        return 0
+
+    def writelines(self, *_args, **_kwargs):
+        pass
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _make_sink():
+    """冻结 + 窗口模式（双击启动）时的日志去向。
+
+    优先写 `data/logs/desktop.log`（用户反馈问题时可直接附带）；打不开就退回内存黑洞。
+    只建 data/logs/，不碰 data/profiles/<id>，因此不会干扰首次迁移。
+    """
+    try:
+        logs = base_data_dir() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / "desktop.log"
+        mode = "w" if path.exists() and path.stat().st_size > 512 * 1024 else "a"
+        f = open(path, mode, encoding="utf-8", errors="replace", buffering=1)
+        f.write(f"\n===== IfWe {version()} 启动（pid {os.getpid()}）=====\n")
+        return f
+    except Exception:
+        return _NullStream()
+
+
+def _safe_stdio() -> None:
+    """把标准流整理成「永远可用」的状态（幂等，可反复调用）。
+
+    两个真实场景，缺一不可：
+    1. 输出被重定向到非 UTF-8 编码的管道/文件（CI runner cp1252、中文系统 cp936）时，
+       打印中文会 UnicodeEncodeError，甚至让 FastAPI lifespan 启动失败 → 固定为 UTF-8+replace；
+    2. 双击启动的窗口程序没有任何标准句柄，sys.stdout/stderr 是 None →
+       uvicorn 日志配置调 sys.stdout.isatty() 直接 AttributeError（2026-09-13 用户实测）→ 装安全接收端。
+    交互式控制台在 Windows 上本就走 PEP 528 的 UTF-8 通道，reconfigure 等价于无操作。
+    """
+    if sys.stdout is None:
+        sys.stdout = _make_sink()
+    if sys.stderr is None:
+        sys.stderr = _make_sink()
     for stream in (sys.stdout, sys.stderr):
         if stream is not None and hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except (OSError, ValueError):
                 pass
-
-
-_safe_stdio()
 
 # ---- 内置默认值（与 config.example.yaml 一致） ----
 _DEFAULTS: dict[str, Any] = {
@@ -599,3 +665,8 @@ def person_display_name(person: str) -> str:
     people = load()["people"]
     p = people.get(person, {}) or {}
     return (p.get("name") or p.get("display") or person).strip() or person
+
+
+# 模块加载完再整理标准流（_safe_stdio 需要用到上面定义的 base_data_dir()/version()）。
+# config 是所有入口最先 import 的模块之一，这行确保 CLI / 服务 / 打包 exe 都拿到可用流。
+_safe_stdio()
