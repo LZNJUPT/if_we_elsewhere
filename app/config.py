@@ -29,6 +29,25 @@ def _resolve_root() -> Path:
 
 ROOT = _resolve_root()
 
+
+def _safe_stdio() -> None:
+    """把标准流固定为 UTF-8 + 宽容替换（应用级加固，在 import 时生效）。
+
+    不允许任何入口因为「往控制台打一行日志」而崩：
+    - 冻结 exe 的输出被重定向到非 UTF-8 管道时（runner cp1252 / 中文系统 cp936），
+      打印中文会 UnicodeEncodeError，甚至让 FastAPI lifespan 启动失败（CI run#3 实测）；
+    - 交互式控制台在 Windows 上本就走 PEP 528 的 UTF-8 通道，reconfigure 等价于无操作。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+_safe_stdio()
+
 # ---- 内置默认值（与 config.example.yaml 一致） ----
 _DEFAULTS: dict[str, Any] = {
     "people": {
