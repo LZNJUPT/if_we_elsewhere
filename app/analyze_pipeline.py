@@ -28,7 +28,7 @@ import config as cfg_mod
 import phase5_common as pc
 import phase6_engine as p6
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = cfg_mod.resource_dir()        # schema 所在（源码=app/；PyInstaller=_MEIPASS/app）
 SCHEMAS = ["schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
            "phase5_schema.sql", "phase6_schema.sql", "schema_if.sql"]
 
@@ -41,9 +41,8 @@ class AnalyzeCancelled(Exception):
 
 
 def _apply_all_schemas(conn) -> None:
-    for name in SCHEMAS:
-        conn.executescript((APP_DIR / name).read_text(encoding="utf-8"))
-    conn.commit()
+    """建齐全部结构（幂等）——实现与依赖统一收在 phase5_common，避免两处清单漂移"""
+    pc.apply_all_schemas(conn)
 
 
 def _load_msgs_grouped(conn, session_gap_s: int | None = None) -> list[list[dict]]:

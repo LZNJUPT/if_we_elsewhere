@@ -13,6 +13,9 @@ rewrite one sentence — and let the person in your memory answer
 
 [中文](README.md) · Quick Start · [Import Guide](docs/IMPORT_EN.md) · [Architecture](docs/ARCHITECTURE_EN.md) · [Privacy](PRIVACY_EN.md) · [Disclaimer](DISCLAIMER_EN.md)
 
+[![release](https://github.com/LZNJUPT/if_we_elsewhere/actions/workflows/release.yml/badge.svg)](https://github.com/LZNJUPT/if_we_elsewhere/actions/workflows/release.yml)
+**[⬇ Download the latest build (no install)](https://github.com/LZNJUPT/if_we_elsewhere/releases/latest)**
+
 </div>
 
 ---
@@ -88,7 +91,9 @@ IfWe is a **local-first** relationship timeline tool:
 
 ## Download & run (Windows)
 
-Prefer no command line? Download `IfWe-win64.zip`, unzip and double-click `IfWe.exe`:
+No command line needed — grab `IfWe-win64-v*.zip` from the
+**[Releases page](https://github.com/LZNJUPT/if_we_elsewhere/releases/latest)** and unzip,
+then double-click `IfWe/IfWe.exe`:
 
 1. First launch shows an onboarding card — **sample data** (fictional, unrelated to any
    real person) / **import my logs** / **configure the LLM**;
@@ -97,10 +102,17 @@ Prefer no command line? Download `IfWe-win64.zip`, unzip and double-click `IfWe.
 3. The left "friends" panel lets you create / switch / rename / delete friends — every
    friend owns a completely separate data directory.
 
-Notes: `data/` sits next to the exe (uninstall = delete the folder; no registry writes);
-Windows 10 1803+ / Windows 11 with the Edge WebView2 runtime (falls back to your default
-browser when unavailable); builds are onedir, unpacked, no UPX, and each release lists a
-`SHA256` value — verify it before allowing a SmartScreen prompt.
+| Channel | What you get | When it updates |
+| --- | --- | --- |
+| **Releases (stable)** | `IfWe-win64-vX.Y.Z.zip` + SHA256 | on every `vX.Y.Z` tag push (CI builds it) |
+| **Releases (nightly preview)** | `IfWe-nightly-main.zip` | on every push to `main`, updated in place |
+| Actions → Artifacts | same files, 30-day retention | on every build |
+
+Notes: `data/` sits inside the unzipped folder (uninstall = delete the folder; no registry
+writes); Windows 10 1803+ / Windows 11 with the Edge WebView2 runtime (falls back to your
+default browser when unavailable); builds are onedir, unpacked, no UPX — verify the
+`SHA256` (`Get-FileHash .\IfWe-win64-v0.3.0.zip -Algorithm SHA256`) before allowing a
+SmartScreen prompt. Release pipeline details: [docs/RELEASE.md](docs/RELEASE.md) (中文).
 
 ## Quick start in 3 steps
 
@@ -183,12 +195,17 @@ OpenAI-compatible endpoint works (DeepSeek / GLM / local inference).
 
 ```bash
 pip install pyinstaller pywebview keyring
-pyinstaller IfWe.spec --noconfirm     # → dist/IfWe/IfWe.exe  (onedir)
+python -m PyInstaller IfWe.spec --noconfirm --clean   # → dist/IfWe/IfWe.exe (onedir)
+python scripts/package_release.py                     # → dist/IfWe-win64-v<version>.zip + .sha256
+python scripts/package_release.py --verify dist/IfWe-win64-v<version>.zip
 ```
 
-The bundle manifest lives in `IfWe.spec` (static assets, sample data, icon — all
-version-controlled). Before publishing, run `python scripts/check_privacy.py` and make
-sure no `data/` directory is present in the release tree.
+The bundle manifest lives in `IfWe.spec`; `package_release.py` includes a data-leak gate
+(aborts if any user data such as `config.yaml` / `*.db` ends up in the artifact).
+
+Recommended: let CI do it — bump `VERSION` + CHANGELOG, then push the `main` branch and a
+`vX.Y.Z` tag; the workflow runs tests, the privacy gate, the PyInstaller build, a smoke
+test of the packaged exe, and creates the GitHub Release. See [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Read before use
 

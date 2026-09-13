@@ -270,7 +270,7 @@ def persist_settings(updates: dict[str, Any], section: str = "llm") -> tuple[boo
 
     cfg_path = settings_path()
     if not cfg_path.is_file():
-        tpl = ROOT / "config.example.yaml"
+        tpl = template_path()                          # 打包后模板在只读资源目录
         if not tpl.is_file():
             return False, "找不到 config.example.yaml，无法生成 config.yaml"
         try:
@@ -422,6 +422,84 @@ def persist_import_config(source: str, smap: dict[str, str]) -> bool:
 
 def root() -> Path:
     return ROOT
+
+
+_RES_DIR_CACHE: dict[str, str] = {}
+
+
+def resource_dir() -> Path:
+    """只读资源目录（schema / 静态前端 / 示例数据所在处）。
+
+    源码运行 = 仓库 `app/`；PyInstaller 冻结时模块的 `__file__` 指向 `_MEIPASS` 根，
+    而 datas 把它们放在 `_MEIPASS/app/`，所以必须逐个候选目录探测（以 schema_v1.sql 为标志）。
+    """
+    if _RES_DIR_CACHE.get("app"):
+        return Path(_RES_DIR_CACHE["app"])
+    cands: list[Path] = [Path(__file__).resolve().parent]        # 源码：仓库 app/
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        cands += [Path(meipass) / "app", Path(meipass)]          # 打包：_MEIPASS/app
+    if getattr(sys, "frozen", False):
+        cands.append(Path(sys.executable).resolve().parent / "_internal" / "app")
+    for d in cands:
+        try:
+            if (d / "schema_v1.sql").is_file():
+                _RES_DIR_CACHE["app"] = str(d)
+                return d
+        except OSError:
+            continue
+    return Path(__file__).resolve().parent
+
+
+def sample_dir() -> Path:
+    """示例数据目录（sample_data/）：源码在仓库根，打包后在只读资源目录同级"""
+    cands = [ROOT / "sample_data"]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        cands += [Path(meipass) / "sample_data", Path(meipass) / "app" / "sample_data"]
+    cands.append(resource_dir() / "sample_data")
+    for d in cands:
+        try:
+            if (d / "chat.sample.jsonl").is_file():
+                return d
+        except OSError:
+            continue
+    return cands[0]
+
+
+def template_path() -> Path:
+    """config.example.yaml 的位置（源码在仓库根；打包后在只读资源目录）"""
+    cands = [ROOT / "config.example.yaml"]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        cands += [Path(meipass) / "config.example.yaml",
+                  Path(meipass) / "app" / "config.example.yaml"]
+    for p in cands:
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return cands[0]
+
+
+def version() -> str:
+    """版本号唯一来源：仓库根 `VERSION`（打包时随 exe 一起分发；缺失则回退 dev 标识）。
+
+    冻结运行（PyInstaller）时先在 exe 同级找，再退回只读资源目录（`_MEIPASS`）。
+    """
+    cands = [ROOT / "VERSION"]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        cands.append(Path(meipass) / "VERSION")
+    for p in cands:
+        try:
+            v = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if v:
+            return v
+    return "0.0.0-dev"
 
 
 def base_data_dir() -> Path:

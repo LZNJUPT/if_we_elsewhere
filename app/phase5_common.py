@@ -24,12 +24,13 @@ from typing import Optional
 import config as cfg_mod
 
 ROOT = Path(__file__).resolve().parent.parent          # 项目根（app/ 的上一级）
+RESOURCE_DIR = cfg_mod.resource_dir()                  # schema/静态资源所在（源码=app/；打包=_MEIPASS/app）
 
 # 以下路径/显示名在导入时取一次（兼容旧调用方）；切换好友或改配置后请调 refresh_paths()
 DATA_DIR = cfg_mod.data_dir()
 DB_PATH = cfg_mod.db_path()
 RESULT_DIR = DATA_DIR / "phase5_results"
-SCHEMA_PATH = Path(__file__).resolve().parent / "phase5_schema.sql"
+SCHEMA_PATH = RESOURCE_DIR / "phase5_schema.sql"
 PERSONA_DIR = cfg_mod.persona_dir()
 
 # 显示名来自配置（people.A/B.display，用户自填或留空用代号）；内部逻辑一律用 A/B
@@ -74,13 +75,32 @@ def new_sim_id() -> str:
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(cfg_mod.db_path())        # 动态：随当前好友的数据目录切换
+    db = cfg_mod.db_path()                           # 动态：随当前好友的数据目录切换
+    db.parent.mkdir(parents=True, exist_ok=True)     # 全新安装 / 空数据目录也能直接开库
+    conn = sqlite3.connect(db)
     conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:
+    """只建 Phase 5 结构（历史入口，保留兼容）"""
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.commit()
+
+
+# 全套结构（幂等 CREATE TABLE IF NOT EXISTS）。新库 / 新好友首次访问时用它建齐，
+# 否则 messages / relationship_state / turning_points 等表缺失会让上层查询直接报错。
+ALL_SCHEMAS = ("schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
+               "phase5_schema.sql", "phase6_schema.sql", "schema_if.sql")
+
+
+def apply_all_schemas(conn: sqlite3.Connection) -> None:
+    """建齐全部结构（幂等）；顺序与 analyze_pipeline 保持一致，便于排查"""
+    base = cfg_mod.resource_dir()          # 打包后 schema 在 _MEIPASS/app，不能按 __file__ 找
+    for name in ALL_SCHEMAS:
+        p = base / name
+        if p.is_file():
+            conn.executescript(p.read_text(encoding="utf-8"))
     conn.commit()
 
 

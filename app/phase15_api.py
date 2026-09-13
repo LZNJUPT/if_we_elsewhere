@@ -51,15 +51,11 @@ from phase5_llm import get_client
 
 # 静态资源：源码运行 = 仓库内 app/phase15_web；PyInstaller 冻结 = _MEIPASS/app/phase15_web
 def _resolve_web_dir() -> Path:
-    here = Path(__file__).resolve().parent / "phase15_web"
-    if here.is_dir():
-        return here
-    meipass = getattr(sys, "_MEIPASS", "")
-    if meipass:
-        for cand in (Path(meipass) / "app" / "phase15_web", Path(meipass) / "phase15_web"):
-            if cand.is_dir():
-                return cand
-    return here
+    for cand in (cfg_mod.resource_dir() / "phase15_web",
+                 Path(__file__).resolve().parent / "phase15_web"):
+        if cand.is_dir():
+            return cand
+    return Path(__file__).resolve().parent / "phase15_web"
 
 
 WEB_DIR = _resolve_web_dir()
@@ -71,7 +67,7 @@ MEDIA_NAME = re.compile(r"^[0-9a-f]{32}\.(gif|jpg|jpeg|png)$", re.I)
 MEDIA_MIME = {".gif": "image/gif", ".png": "image/png",
               ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
-app = FastAPI(title="IfWe · 对话推演", version="0.3.0")
+app = FastAPI(title="IfWe · 对话推演", version=cfg_mod.version())
 
 _lock = threading.RLock()
 _retriever = None
@@ -94,13 +90,19 @@ TP_TYPE_META = {
 }
 
 
-SCHEMA_IF = Path(__file__).resolve().parent / "schema_if.sql"
+SCHEMA_IF = cfg_mod.resource_dir() / "schema_if.sql"   # 兼容保留（已并入 pc.ALL_SCHEMAS）
+
+
+_schema_ready: set[str] = set()          # 已建齐结构的库（切换好友/重建库时清空）
 
 
 def _conn() -> sqlite3.Connection:
+    """连当前好友的库并把结构建齐（幂等；首次访问某个库时才跑一次 DDL）"""
     conn = pc.connect()
-    pc.apply_schema(conn)
-    conn.executescript(SCHEMA_IF.read_text(encoding="utf-8"))   # ifr_branch（分支元数据）
+    key = str(cfg_mod.db_path())
+    if key not in _schema_ready:
+        pc.apply_all_schemas(conn)
+        _schema_ready.add(key)
     conn.commit()
     return conn
 
@@ -205,7 +207,6 @@ def api_health():
     return {"ok": True, "key": bool(cfg_mod.api_key()), "key_env": key_env,
             "port": PORT, "profile": cfg_mod.active_profile(),
             "busy": _op_reason(), "version": app.version}
-
 
 @app.get("/api/state")
 def api_state(line: str | None = None, tail: int = 200):
@@ -708,6 +709,7 @@ def api_import_commit(body: ImportCommitBody):
             _import_cleanup(body.import_id)          # 链路结束（含失败）立即清理
         for sid in list(_engines):                   # 旧库已被重建，缓存引擎全部失效
             _drop_engine(sid)
+        _schema_ready.clear()                        # 库被全量重建，结构需重新确认
         return {"ok": True, "summary": summary}
 
 

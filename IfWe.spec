@@ -36,6 +36,7 @@ datas = [
     (str(ROOT / "app"), "app"),                       # 含 *.sql 结构与 phase15_web 静态资源
     (str(ROOT / "sample_data"), "sample_data"),
     (str(ROOT / "config.example.yaml"), "."),
+    (str(ROOT / "VERSION"), "."),                     # 版本号唯一来源（/api/health 会回显）
 ]
 icon = ROOT / "app" / "phase15_web" / "icon.ico"
 if icon.is_file():

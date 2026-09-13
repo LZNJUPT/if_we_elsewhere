@@ -7,6 +7,18 @@
 
 ### 新增
 
+- **CI 自动出成品（GitHub Actions）**：`.github/workflows/release.yml`
+  推送 `vX.Y.Z` 标签 → 校验（测试 + 隐私门禁 + 版本一致性）→ PyInstaller 构建 →
+  打包 zip/SHA256 → 成品冒烟 → **创建正式 Release**（标记 Latest）；
+  每次推送 `main` 则原地更新 `nightly` 预发布，永远能下到最新构建；PR 只跑校验。
+  用户不需要下载源代码，直接下免安装包即可。
+- **发布脚本**：`scripts/package_release.py`（打包 zip + SHA256，内置**数据红线闸门**：
+  产物里出现 `config.yaml`/`*.db` 即中止；`--verify` 校验 zip 结构）与
+  `scripts/release_notes.py`（从 CHANGELOG 生成 Release 说明；`--check` 校验
+  tag == `VERSION` == CHANGELOG）。
+- **版本号单一来源**：仓库根 `VERSION`，`/api/health` 与桌面启动器都会回显（打包时随包分发）。
+- **桌面启动器 `--no-window`**：只起本地服务、不开窗口也不开浏览器，供冒烟测试/自接前端用；
+  同时输出机器可读的 `[desktop] READY http://127.0.0.1:<port>`。
 - **界面内分析（替代 CLI `analyze`）**：顶栏「分析」→ 勾选是否离线 → 阶段进度面板
   （1 准备 / 2 事件 / 3 记忆 / 4 关系状态 / 5 转折点 / 6 人格档案 + 当前消息 + 已用时），
   支持中途中止；完成后一键跳到人物档案。
@@ -55,6 +67,20 @@
 - 导入临时目录随当前好友切换；导入向导第三页直接给出「立即分析」入口。
 - 打包（PyInstaller）时数据目录相对 exe 同级，只读资源从 `_MEIPASS` 读取。
 - `scripts/check_privacy.py` 增加目录名前缀跳过（`data_backup_*`，迁移备份里的真实数据不参与发布扫描）。
+
+### 修复（打包链路实测发现）
+
+- **打包后只读资源定位错误**：冻结运行时模块的 `__file__` 指向 `_MEIPASS` 根，而
+  schema / 静态前端 / 示例数据按 spec 放在 `_MEIPASS/app` 下 → 打包版会「导入记录」直接失败、
+  人物档案 500。新增 `config.resource_dir()/sample_dir()/template_path()` 统一探测，
+  `phase1_ingest`（建库 schema）、`phase5_common`、`analyze_pipeline`、`phase15_dial_engine`、
+  `phase15_api` 全部改用（源码运行时行为不变）。
+- **新库 / 空数据目录缺表**：`relationship_state` 等表只在 analyze 时才建，
+  导致 `selftest` 在空目录直接崩、全新好友点「人物档案」报 500。现由
+  `phase5_common.apply_all_schemas()` 建齐全部结构（API 首次访问某个库时执行一次，
+  导入重建库后自动失效重跑；CLI 入口同样改用），`pc.connect()` 也会自动创建父目录。
+- 打包版 `data/` 首次启动迁移、`nightly` 与正式版的版本号一致性均由 CI 与冒烟步骤覆盖
+  （成品 exe 会被真的启动一次并访问 `/api/health`、`/api/persona`、`/api/onboarding`、首页）。
 
 ### 明确未做（本期非目标）
 

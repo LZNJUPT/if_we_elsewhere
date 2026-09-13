@@ -204,13 +204,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="desktop.py", description="IfWe 桌面启动器")
     ap.add_argument("--port", type=int, default=0, help="端口（默认取 config defaults.port）")
     ap.add_argument("--browser", action="store_true", help="用默认浏览器打开，不建原生窗口")
+    ap.add_argument("--no-window", action="store_true",
+                    help="只起本地服务、不开窗口也不开浏览器（冒烟测试 / 自己接前端用）")
     args = ap.parse_args()
 
     inst = acquire_single_instance()
     if not inst["ok"]:
         url = f"http://127.0.0.1:{inst['port']}" if inst["port"] else ""
         print("[desktop] IfWe 已经有一个窗口在运行" + (f"：{url}" if url else ""))
-        if url:
+        if url and not args.no_window:
             open_browser(url)
         return 1
 
@@ -227,10 +229,17 @@ def main() -> int:
             print("[desktop] 本地服务启动失败（25 秒内未就绪），已退出")
             return 2
         url = f"http://127.0.0.1:{port}"
-        print(f"[desktop] IfWe 已启动：{url}")
+        print(f"[desktop] IfWe {cfg_mod.version()} 已启动：{url}")
+        print(f"[desktop] READY {url}", flush=True)          # 机器可读标记（冒烟脚本用）
         print("[desktop] 数据目录：", cfg_mod.data_dir())
         print("[desktop] 关闭窗口（或 Ctrl+C）即退出；数据全部留在本机。")
-        if args.browser:
+        if args.no_window:
+            try:
+                while th.is_alive():
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                pass
+        elif args.browser:
             open_browser(url)
             try:
                 while th.is_alive():

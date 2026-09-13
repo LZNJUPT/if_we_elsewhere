@@ -307,5 +307,35 @@ class TestRemoveTree(ProfileBase):
         self.assertEqual(pmod.remove_tree(self.base() / "nope"), [])
 
 
+class TestSchemas(ProfileBase):
+    """回归：新库/新好友首次访问必须把结构建齐（曾出现空库上缺表报错）"""
+
+    WANT = ("meta", "messages", "sessions", "daily_stats", "events",
+            "turning_points", "relationship_state", "facts", "persona_snapshot",
+            "sim_runs", "sim_messages", "sim_rel_state", "ifr_branch")
+
+    def test_apply_all_schemas_creates_every_table_and_is_idempotent(self):
+        import phase5_common as pc
+        conn = pc.connect()
+        pc.apply_all_schemas(conn)
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = [t for t in self.WANT if t not in tables]
+        self.assertEqual(missing, [], f"缺表：{missing}（tables={sorted(tables)}）")
+        pc.apply_all_schemas(conn)          # 幂等：再来一次不报错、表还在
+        tables2 = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertTrue(set(self.WANT) <= tables2)
+        conn.close()
+
+    def test_rel_state_at_on_empty_db_does_not_raise(self):
+        """空库上取「最近一期关系状态」应返回 None，而不是 OperationalError"""
+        import phase5_common as pc
+        conn = pc.connect()
+        pc.apply_all_schemas(conn)
+        self.assertIsNone(pc.rel_state_at(conn, "2026-09-13"))
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

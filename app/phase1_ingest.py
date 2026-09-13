@@ -20,10 +20,12 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import config as cfg_mod
+
 TZ = timezone(timedelta(hours=8))   # v1 固定东八区（与 config chat.timezone 默认值一致）
 
 ROOT = Path(__file__).resolve().parent.parent
-SCHEMA = Path(__file__).resolve().parent / "schema_v1.sql"
+SCHEMA = None        # 兼容占位：实际路径由 cfg_mod.resource_dir() 在调用时解析（打包安全）
 SESSION_GAP_S = 30 * 60             # 可被 config chat.session_gap_minutes 覆盖（见 ingest 参数）
 
 # ---------- 脱敏规则(中档) ----------
@@ -148,10 +150,12 @@ def parse_message(rec: dict, sender_map: dict[str, str]) -> dict:
     return out
 
 
-def build_db(db_path: Path, schema_path: Path = SCHEMA, no_reset: bool = False) -> sqlite3.Connection:
+def build_db(db_path: Path, schema_path: Path | None = None, no_reset: bool = False) -> sqlite3.Connection:
     if no_reset and db_path.exists():
         print(f"[i] 复用已有库: {db_path}")
         return sqlite3.connect(db_path)
+    if schema_path is None:          # 打包后 schema 在只读资源目录（_MEIPASS/app）
+        schema_path = cfg_mod.resource_dir() / "schema_v1.sql"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()

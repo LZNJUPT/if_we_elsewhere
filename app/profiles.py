@@ -270,7 +270,7 @@ def build_demo_library() -> dict:
     import analyze_pipeline
     from phase1_ingest import ingest
 
-    sample = cfg_mod.root() / "sample_data" / "chat.sample.jsonl"
+    sample = cfg_mod.sample_dir() / "chat.sample.jsonl"     # 打包后在只读资源目录
     if not sample.is_file():
         raise FileNotFoundError("缺少 sample_data/chat.sample.jsonl")
     cfg_mod.db_path().parent.mkdir(parents=True, exist_ok=True)
@@ -280,7 +280,7 @@ def build_demo_library() -> dict:
     pdir = cfg_mod.persona_dir()
     pdir.mkdir(parents=True, exist_ok=True)
     for person in ("A", "B"):
-        src = cfg_mod.root() / "sample_data" / f"persona_v1_{person}.json"
+        src = cfg_mod.sample_dir() / f"persona_v1_{person}.json"
         if src.is_file():
             shutil.copy(src, pdir / f"persona_v1_{person}.json")
     return {"message_count": summary.get("message_count"),

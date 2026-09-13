@@ -1,0 +1,200 @@
+name: release
+
+# 触发：
+#   · 推送 vX.Y.Z 标签 → 构建 Windows 免安装包 → 创建正式 Release（latest）
+#   · 推送到 main     → 同样构建，但发布/更新 "nightly" 预发布（始终能下到最新 main 构建）
+#   · Pull Request    → 只跑校验（测试 + 隐私门禁），不构建发布物
+#   · 手动触发        → 全流程（在 main 上手动跑也会更新 nightly）
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 创建 Release / 上传资产需要
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------- 1) 校验
+  verify:
+    name: 校验（测试 + 隐私门禁 + 版本一致性）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 单元测试（stdlib unittest）
+        run: python -m unittest discover -s tests -v
+
+      - name: 隐私门禁（红线词表扫描）
+        run: python scripts/check_privacy.py
+
+      - name: 版本一致性（tag == VERSION == CHANGELOG）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/release_notes.py --version "${{ github.ref_name }}" --check
+
+      - name: 发布脚本自检
+        run: |
+          python scripts/package_release.py --help > /dev/null
+          python scripts/release_notes.py --version "$(cat VERSION)" --check
+
+  # ---------------------------------------------------------------- 2) 构建 + 发布
+  build-windows:
+    name: 构建 Windows 免安装包并发布
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖（含打包期依赖）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pywebview
+
+      - name: 版本一致性（正式发布必须对得上）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: python scripts/release_notes.py --version "${{ github.ref_name }}" --check
+
+      - name: PyInstaller 构建（onedir / 不加壳 / 不用 UPX）
+        run: python -m PyInstaller IfWe.spec --noconfirm --clean
+
+      - name: 打包 zip + SHA256（内置数据泄漏闸门）
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            NAME="IfWe-win64-${GITHUB_REF_NAME}"
+          else
+            NAME="IfWe-nightly-main"
+          fi
+          python scripts/package_release.py --dist dist/IfWe --outdir dist --name "$NAME"
+          ls -l dist
+
+      - name: 产物自检（zip 结构 + 关键资源 + 无用户数据）
+        shell: bash
+        run: python scripts/package_release.py --verify "$(ls dist/*.zip | head -n 1)"
+
+      - name: 成品冒烟（真的把打包后的 exe 跑起来，验证能对外服务）
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          set -euo pipefail
+          ./dist/IfWe/IfWe.exe --no-window --port 8231 > dist/exe_smoke.log 2>&1 &
+          python - <<'PY'
+          import json, time, urllib.request
+          base = "http://127.0.0.1:8231"
+          health = None
+          for _ in range(60):
+              try:
+                  with urllib.request.urlopen(base + "/api/health", timeout=2) as r:
+                      health = json.loads(r.read()); break
+              except Exception:
+                  time.sleep(1)
+          assert health, "打包后的 exe 60 秒内没有起来（看 dist/exe_smoke.log）"
+          print("[ci] exe health:", json.dumps(health, ensure_ascii=False))
+          assert health.get("version") and health["version"] != "0.0.0-dev", "版本号没打进去"
+          for path in ("/api/profiles", "/api/settings", "/api/persona", "/api/onboarding", "/"):
+              with urllib.request.urlopen(base + path, timeout=15) as r:
+                  body = r.read()
+              assert r.status == 200 and body, f"{path} 未正常返回"
+              print(f"[ci] {path} -> {r.status} ({len(body)} B)")
+          print("[ci] 打包产物可独立运行 ✅")
+          PY
+          taskkill //IM IfWe.exe //F || true
+          echo "--- exe 启动日志 ---"
+          cat dist/exe_smoke.log || true
+
+      - name: 离线自检（世界→回合→落库→跨天→重启续聊，不需要 API Key）
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python - <<'PY'
+          import os, shutil, subprocess, sys, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          data = Path(tempfile.mkdtemp(prefix="ifwe_ci_")) / "data"
+          (data / "persona").mkdir(parents=True)
+          for p in ("A", "B"):                      # 装载虚构示例人格，等价 run.py demo 的状态
+              shutil.copy(root / "sample_data" / f"persona_v1_{p}.json",
+                          data / "persona" / f"persona_v1_{p}.json")
+          env = dict(os.environ, IFWE_DATA_DIR=str(data))
+          r = subprocess.run([sys.executable, "app/phase15_dial_engine.py", "selftest"],
+                             env=env, capture_output=True, text=True, timeout=900)
+          print(r.stdout[-3000:])
+          if r.stderr.strip():
+              print(r.stderr[-1500:], file=sys.stderr)
+          assert r.returncode == 0, f"selftest 退出码 {r.returncode}"
+          assert "全部通过" in r.stdout, "selftest 未打印通过标记"
+          print("[ci] 离线自检通过 ✅（与真实数据完全隔离）")
+          PY
+
+      - name: 上传构建产物（Actions Artifacts，无需授权即可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: IfWe-win64-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 / 更新 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ZIP=$(ls dist/*.zip | head -n 1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            TITLE="IfWe ${GITHUB_REF_NAME}"
+            FLAGS="--latest"
+            TARGET=""
+            python scripts/release_notes.py --version "${GITHUB_REF_NAME}" \
+              --zip "$ZIP" --out dist/notes.md
+          else
+            TAG="nightly"
+            TITLE="IfWe · 最新构建（main）"
+            FLAGS="--prerelease"
+            TARGET="--target ${GITHUB_SHA}"
+            PREFIX=$'> ⚠️ 这是 **main 分支的最新自动构建**（预发布），可能包含尚未发布的改动。\n> 想要稳定版，请下载带 `vX.Y.Z` 编号的 Release。'
+            python scripts/release_notes.py --version "$(cat VERSION)" \
+              --zip "$ZIP" --out dist/notes.md --prefix "$PREFIX"
+          fi
+          printf '\n---\n\n构建信息：commit `%s` ｜ 工作流 [%s](%s/%s/actions/runs/%s)\n' \
+            "$GITHUB_SHA" "$GITHUB_WORKFLOW" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            >> dist/notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip dist/*.sha256 --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file dist/notes.md $FLAGS
+            echo "[release] 已更新既有 Release：$TAG"
+          else
+            gh release create "$TAG" dist/*.zip dist/*.sha256 \
+              --title "$TITLE" --notes-file dist/notes.md $FLAGS $TARGET
+            echo "[release] 已创建 Release：$TAG"
+          fi

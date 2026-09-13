@@ -508,7 +508,7 @@ def main():
 
     pc.RESULT_DIR.mkdir(parents=True, exist_ok=True)
     conn = pc.connect()
-    pc.apply_schema(conn)
+    pc.apply_all_schemas(conn)
     if args.smoke:
         args.days, args.max_turns = 2, 3
     if args.sim:

@@ -11,6 +11,9 @@ IfWe 基于你们真实的聊天记录，重建一个有说话习惯、有共同
 
 [English](README_EN.md) · 快速开始 · [导入指南](docs/IMPORT.md) · [架构](docs/ARCHITECTURE.md) · [隐私设计](PRIVACY.md) · [免责声明](DISCLAIMER.md)
 
+[![release](https://github.com/LZNJUPT/if_we_elsewhere/actions/workflows/release.yml/badge.svg)](https://github.com/LZNJUPT/if_we_elsewhere/actions/workflows/release.yml)
+**[⬇ 下载最新版（免安装）](https://github.com/LZNJUPT/if_we_elsewhere/releases/latest)**
+
 </div>
 
 ---
@@ -74,7 +77,8 @@ IfWe 是一个**本地优先**的关系时间线工具：
 
 ## 下载即用（Windows）
 
-不想碰命令行？下载 `IfWe-win64.zip`，解压后双击 `IfWe.exe`：
+**不想碰命令行？→ [Releases 页面](https://github.com/LZNJUPT/if_we_elsewhere/releases/latest) 下载 `IfWe-win64-v*.zip`**，
+解压后双击 `IfWe/IfWe.exe`：
 
 1. 首次启动出现引导卡，三选一：**体验示例数据**（内置虚构对话，与任何真实人物无关）、
    **导入我的记录**、**配置 LLM**；
@@ -82,14 +86,24 @@ IfWe 是一个**本地优先**的关系时间线工具：
    看「人物档案」→ 开一条线开始对话；
 3. 左侧「好友」栏可新建/切换/重命名/删除好友，每个好友的数据完全独立。
 
+下载渠道说明：
+
+| 渠道 | 内容 | 何时更新 |
+| --- | --- | --- |
+| **Releases（正式版）** | `IfWe-win64-vX.Y.Z.zip` + SHA256 | 推送 `vX.Y.Z` 标签时自动构建发布 |
+| **Releases（nightly 预发布）** | `IfWe-nightly-main.zip` | 每次 `main` 分支更新，原地更新，可能含未发布改动 |
+| Actions → Artifacts | 同上（保留 30 天） | 每次构建 |
+
 几点说明：
 
-- **数据位置**：`data/` 就在 exe 同级目录，卸载 = 删掉整个文件夹；不写注册表、不写系统目录。
+- **数据位置**：`data/` 就在解压目录里，卸载 = 删掉整个文件夹；不写注册表、不写系统目录。
 - **运行环境**：Win10 1803+ / Win11（依赖 Edge WebView2 运行时，Win11 自带；缺失时自动改用默认浏览器打开）。
-- **杀软误报**：发布物为 onedir 目录、未加壳、未用 UPX；发布页附 `SHA256` 校验值。
-  若被 SmartScreen 拦截，请先核对哈希，再「更多信息 → 仍要运行」或添加信任。
-- **源码运行**：下面的「3 步开始」一直是官方支持的方式；桌面窗口也可用
-  `python run.py desktop`（需要 `pip install pywebview`，不装则用默认浏览器打开）。
+- **杀软误报**：发布物为 onedir 目录、未加壳、未用 UPX；Release 页给出 `SHA256`。
+  校验（PowerShell）：`Get-FileHash .\IfWe-win64-v0.3.0.zip -Algorithm SHA256`。
+  若被 SmartScreen 拦截，请先核对哈希，再「更多信息 → 仍要运行」或添加信任（请不要关闭系统防护）。
+- **源码运行**：下面的「3 步开始」一直可用；桌面窗口也可用
+  `python run.py desktop`（需 `pip install pywebview`，不装则用默认浏览器打开）。
+- 发布流程与流水线细节见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 3 步开始（源码运行）
 
@@ -119,19 +133,25 @@ python run.py server             # → http://127.0.0.1:8015
 
 ```bash
 pip install pyinstaller pywebview keyring
-pyinstaller IfWe.spec --noconfirm     # 产物：dist/IfWe/IfWe.exe（onedir）
+python -m PyInstaller IfWe.spec --noconfirm --clean   # 产物：dist/IfWe/IfWe.exe（onedir）
+python scripts/package_release.py                     # → dist/IfWe-win64-v<版本>.zip + .sha256
+python scripts/package_release.py --verify dist/IfWe-win64-v<版本>.zip
 ```
 
-打包清单写在 `IfWe.spec`（静态资源、示例数据、图标都在版本管理内）。
-发布前请按 PRIVACY.md 的检查清单跑 `python scripts/check_privacy.py`，并确认发布目录里没有 `data/`。
+打包清单写在 `IfWe.spec`（静态资源、示例数据、版本号、图标都在版本管理内）；
+`package_release.py` 自带**数据红线闸门**：产物里出现 `config.yaml` / `*.db` 之类用户数据即中止。
 
-发布清单（建议逐项过一遍）：
+发布（推荐走 CI，推送标签即可）：
 
-1. `python scripts/check_privacy.py` 零命中；`python -m unittest discover -s tests` 全绿；
-2. 发布树里不含 `data/`、`data_demo/`、`config.yaml`、`*.db`；
-3. 生成 `IfWe-win64.zip` 并附 `SHA256` 校验值；
-4. 若杀软/SmartScreen 误报：走微软误报提交渠道申诉，并在发布说明里给出
-   「添加信任」步骤（见本文「下载即用」一节），不要建议用户直接关闭防护。
+```bash
+echo "0.4.0" > VERSION          # 与 CHANGELOG.md 的版本段保持一致
+git commit -am "chore(release): v0.4.0" && git push origin main
+git tag -a v0.4.0 -m "IfWe v0.4.0" && git push origin v0.4.0
+```
+
+流水线会自动跑「测试 + 隐私门禁 → PyInstaller 构建 → zip/SHA256 → 离线自检 → 创建 Release」，
+详见 [docs/RELEASE.md](docs/RELEASE.md)。发布后建议过一遍其中的检查清单
+（含微软误报申诉与「添加信任」说明）。
 
 ## 一个诚实的边界
 

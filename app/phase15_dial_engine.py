@@ -85,7 +85,7 @@ def get_default_start(conn: sqlite3.Connection) -> str:
 
 DIM_LABEL = p6.DIM_LABEL
 
-SCHEMA_IF = Path(__file__).resolve().parent / "schema_if.sql"
+SCHEMA_IF = cfg_mod.resource_dir() / "schema_if.sql"
 
 
 def _apply_branch_schema(conn: sqlite3.Connection) -> None:
@@ -561,8 +561,7 @@ def _get_client_or_none(offline: bool):
 # ---------------------------------------------------------------- 子命令
 def cmd_new(args) -> None:
     conn = pc.connect()
-    pc.apply_schema(conn)
-    _apply_branch_schema(conn)
+    pc.apply_all_schemas(conn)          # 建齐结构（新库 / 空数据目录也能直接用）
     start = args.start or get_default_start(conn)
     sim_id = new_line(conn, start_day=start, name=args.name, divergence=args.divergence,
                       rewrite=args.rewrite, rewrite_desc=args.desc)
@@ -677,8 +676,7 @@ def cmd_show(args) -> None:
 def cmd_selftest(args) -> None:
     """离线自检：桩客户端验证全链路（世界→会话→回合→落库→关系更新→跨天），不需要 API key"""
     conn = pc.connect()
-    pc.apply_schema(conn)
-    _apply_branch_schema(conn)
+    pc.apply_all_schemas(conn)          # 空数据目录也必须能跑：先建齐全部结构
     name = f"SELFTEST-{time.strftime('%m%d-%H%M%S')}"
     start = args.start or get_default_start(conn)
     sim_id = new_line(conn, start_day=start, name=name, divergence=args.divergence,
