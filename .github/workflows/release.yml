@@ -101,31 +101,43 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          set -euo pipefail
-          ./dist/IfWe/IfWe.exe --no-window --port 8231 > dist/exe_smoke.log 2>&1 &
           python - <<'PY'
-          import json, time, urllib.request
+          import json, subprocess, time, urllib.request
+          from pathlib import Path
+
+          exe = Path("dist/IfWe/IfWe.exe").resolve()
+          assert exe.is_file(), f"找不到打包产物：{exe}"
+          log = open("dist/exe_smoke.log", "w", encoding="utf-8")
+          # 用 Python 起进程并传参，避免 shell 对 /IM、/F 之类参数做路径转换
+          proc = subprocess.Popen([str(exe), "--no-window", "--port", "8231"],
+                                  cwd=str(exe.parent), stdout=log, stderr=subprocess.STDOUT)
           base = "http://127.0.0.1:8231"
           health = None
-          for _ in range(60):
-              try:
-                  with urllib.request.urlopen(base + "/api/health", timeout=2) as r:
-                      health = json.loads(r.read()); break
-              except Exception:
-                  time.sleep(1)
-          assert health, "打包后的 exe 60 秒内没有起来（看 dist/exe_smoke.log）"
-          print("[ci] exe health:", json.dumps(health, ensure_ascii=False))
-          assert health.get("version") and health["version"] != "0.0.0-dev", "版本号没打进去"
-          for path in ("/api/profiles", "/api/settings", "/api/persona", "/api/onboarding", "/"):
-              with urllib.request.urlopen(base + path, timeout=15) as r:
-                  body = r.read()
-              assert r.status == 200 and body, f"{path} 未正常返回"
-              print(f"[ci] {path} -> {r.status} ({len(body)} B)")
-          print("[ci] 打包产物可独立运行 ✅")
+          try:
+              for _ in range(60):
+                  try:
+                      with urllib.request.urlopen(base + "/api/health", timeout=2) as r:
+                          health = json.loads(r.read())
+                      break
+                  except Exception:
+                      if proc.poll() is not None:
+                          raise AssertionError("exe 进程提前退出了")
+                      time.sleep(1)
+              assert health, "打包后的 exe 60 秒内没有起来（见 dist/exe_smoke.log）"
+              print("[ci] exe health:", json.dumps(health, ensure_ascii=False))
+              assert health.get("version", "0.0.0-dev") != "0.0.0-dev", "版本号没有打进包"
+              for path in ("/api/profiles", "/api/settings", "/api/persona", "/api/onboarding", "/"):
+                  with urllib.request.urlopen(base + path, timeout=15) as r:
+                      body = r.read()
+                  assert r.status == 200 and body, f"{path} 未正常返回"
+                  print(f"[ci] {path} -> {r.status} ({len(body)} B)")
+              print("[ci] 打包产物可独立运行 ✅")
+          finally:
+              subprocess.run(["taskkill", "/PID", str(proc.pid), "/F"], capture_output=True)
+              log.close()
+              print("--- exe 启动日志（尾部）---")
+              print(Path("dist/exe_smoke.log").read_text(encoding="utf-8", errors="replace")[-1500:])
           PY
-          taskkill //IM IfWe.exe //F || true
-          echo "--- exe 启动日志 ---"
-          cat dist/exe_smoke.log || true
 
       - name: 离线自检（世界→回合→落库→跨天→重启续聊，不需要 API Key）
         shell: bash

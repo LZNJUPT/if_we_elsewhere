@@ -140,11 +140,13 @@ class TestProfileSwitch(ProfileBase):
     def test_profile_yaml_overrides_global_only_for_that_friend(self):
         pid = pmod.create("Ada")["id"]
         d = cfg_mod.profile_data_dir(pid)
+        emoji_dir = self.tmp / "emojis"                 # 用平台中立的绝对路径，跨平台可跑
+        emoji_dir.mkdir(exist_ok=True)
         (d / "profile.yaml").write_text(
-            "media:\n  emojis_dir: 'D:/emojis'\n"
+            f'media:\n  emojis_dir: "{emoji_dir.as_posix()}"\n'
             "people:\n  B: { key: 'B', display: 'Ada' }\n", encoding="utf-8")
         cfg_mod.set_active_profile(pid)
-        self.assertEqual(cfg_mod.emojis_dir(), Path("D:/emojis"))
+        self.assertEqual(cfg_mod.emojis_dir(), emoji_dir)
         self.assertEqual(cfg_mod.sender_names()["B"], "Ada")
         self.assertEqual(cfg_mod.load()["defaults"]["port"], 8015)     # 全局值不被污染
         cfg_mod.set_active_profile("default")
