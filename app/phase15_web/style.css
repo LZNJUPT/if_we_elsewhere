@@ -221,6 +221,53 @@ button{font:inherit}
 .imp-next{margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   border:1px solid #e0e7ff;background:#f8faff;border-radius:10px;padding:10px 12px}
 .imp-next .imp-sub{font-size:11.5px;color:#9aa3b2}
+.bad{color:var(--danger)}
+
+/* ============================ v0.3 多源合并导入 / 媒体库 ============================ */
+.imp-pane{max-height:min(72vh,720px)}
+.imp-merge{border:1px solid var(--line);border-radius:10px;padding:11px 13px;margin-bottom:12px;
+  background:#fbfcfe;font-size:12.5px;color:#374151}
+.imp-merge h3{margin:0 0 8px;font-size:14px}
+.imp-merge h3.ok{color:var(--ok)}
+.imp-merge h3.bad{color:var(--danger)}
+.imp-merge .imp-tag{display:inline-block;margin-top:6px}
+.imp-srclist h3{display:flex;align-items:center;gap:8px;margin:12px 0 8px;font-size:13.5px;color:var(--txt)}
+.imp-srclist h3 .imp-sub,.imp-srcbox .imp-sub,.med-body .imp-sub{font-size:11.5px;color:#9aa3b2}
+.imp-card2{border:1px solid var(--line);border-radius:11px;padding:11px 13px;margin-bottom:10px;
+  background:#fff}
+.imp-card2.bad{border-color:#fecaca;background:#fffbfb}
+.imp-card2-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.imp-card2-head b{font-size:13px;color:var(--txt);word-break:break-all}
+.imp-card2-head .spacer{flex:1}
+.imp-card2 .imp-kv{margin-bottom:8px}
+.imp-card2 .imp-cand{background:#fbfcfe}
+.imp-card2 .form-row{margin:8px 0}
+.imp-ab{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0 4px}
+.imp-ab-col{border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:#fff}
+.imp-ab-col>b{display:block;font-size:12px;color:var(--txt)}
+.imp-ab-col .imp-sub{display:block;font-size:11.5px;color:#9aa3b2;margin-bottom:3px;
+  word-break:break-all}
+.imp-ab-col .sample{font-size:12px;color:#4b5563;white-space:pre-wrap;word-break:break-word;
+  border-top:1px dashed #eef1f6;padding:3px 0}
+.imp-srcbox{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--muted);line-height:1.7}
+.imp-srcbox b{color:var(--txt);font-size:12.5px}
+.src-row{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:9px;
+  padding:7px 10px;margin-top:7px;background:#fbfcfe}
+.src-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.src-main b{font-size:12.5px;word-break:break-all}
+.imp-mediabox{border-top:1px solid var(--line);padding-top:14px;margin-top:16px}
+.imp-mediabox .form-row{margin-top:8px}
+
+.med-body{max-height:min(74vh,740px);overflow-y:auto}
+.med-body .imp-drop{min-height:96px}
+.med-stats{font-size:12.5px;color:var(--muted);margin:12px 0 8px}
+.med-list{margin-top:6px}
+.med-row{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:10px;
+  padding:8px 11px;margin-bottom:7px;background:#fbfcfe}
+.med-thumb{width:44px;height:44px;object-fit:contain;border-radius:8px;background:#eef2f7;flex:0 0 auto}
+.med-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.med-main b{font-size:12.5px;word-break:break-all}
 
 /* ============================ v0.3 好友侧栏 ============================ */
 .fb{border-bottom:1px solid var(--line);background:#fbfcfe}

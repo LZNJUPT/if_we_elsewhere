@@ -29,7 +29,7 @@ import phase5_common as pc
 import phase6_engine as p6
 
 APP_DIR = cfg_mod.resource_dir()        # schema 所在（源码=app/；PyInstaller=_MEIPASS/app）
-SCHEMAS = ["schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
+SCHEMAS = ["schema_v1.sql", "schema_v2.sql", "phase2_schema.sql", "phase4_schema.sql",
            "phase5_schema.sql", "phase6_schema.sql", "schema_if.sql"]
 
 # 断联判定阈值：连续 N 天无消息视为一个断联窗口（转折点标记用）

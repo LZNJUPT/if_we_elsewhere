@@ -505,6 +505,92 @@ def persist_import_config(source: str, smap: dict[str, str]) -> bool:
     return True
 
 
+def persist_sender_matches(a_names: list[str], b_names: list[str]) -> bool:
+    """把「我 / 对方」的账号名（列表）写回 config.yaml 的 people.A/B.match。
+
+    多来源场景下同一个人的账号名往往有多个（微信 wxid、Telegram `user_me`、
+    纯文本里的昵称），所以用列表承接。
+
+    为什么必须记下来：导入向导的 A/B 默认值在没有配置时只能「按消息条数猜」，
+    而对方话多时就会**把 A 猜成对方** —— 一份来源的说话人整体颠倒，会一路传导到
+    关系五维、人格档案与推演语料，而且多份来源一致猜反时 `map_conflicts` 抓不到。
+    记进配置后，下次导入界面就能按用户自己登记过的名字预选。
+
+    策略与 persist_import_config 一致：优先最小文本替换（保住注释），
+    结构对不上再整体重写。返回 True 表示文件已更新。
+    """
+    import json as _json
+    import re as _re
+    import yaml  # 延迟导入：仅在存在配置文件时需要 PyYAML
+
+    cfg_path = ROOT / "config.yaml"
+    if not cfg_path.is_file():
+        return False
+    a_names = [str(x).strip() for x in (a_names or []) if str(x).strip()]
+    b_names = [str(x).strip() for x in (b_names or []) if str(x).strip()]
+    if not a_names and not b_names:
+        return False
+    want = {"A": a_names, "B": b_names}
+
+    orig_text = cfg_path.read_text(encoding="utf-8")
+
+    def _values_ok(d: dict) -> bool:
+        people = d.get("people") or {}
+        for key in ("A", "B"):
+            if not want[key]:
+                continue
+            cur = (people.get(key) or {}).get("match")
+            have = cur if isinstance(cur, list) else ([cur] if cur else [])
+            have = [str(x).strip() for x in have if str(x).strip()]
+            if have != want[key]:
+                return False
+        return True
+
+    try:                                   # 值本来就对：不写
+        cur = yaml.safe_load(orig_text)
+        if isinstance(cur, dict) and _values_ok(cur):
+            return False
+    except Exception:
+        pass
+
+    text = orig_text
+    for key in ("A", "B"):
+        if not want[key]:
+            continue
+        # 标量或列表都吃掉（列表形如 ["a", "b"]），替换成 JSON 列表字面量
+        text = _re.sub(
+            rf"(?m)^([ \t]*{key}:[^\n{{}}]*\{{[^\n{{}}]*?match:[ \t]*)"
+            rf"(\[[^\]\n]*\]|\"[^\"\n]*\"|'[^'\n]*'|[^,{{}}\n]+)",
+            lambda m: m.group(1) + _json.dumps(want[key], ensure_ascii=False),
+            text, count=1)
+
+    try:
+        parsed = yaml.safe_load(text)
+        if isinstance(parsed, dict) and _values_ok(parsed):
+            if text != orig_text:
+                cfg_path.write_text(text, encoding="utf-8")
+                return True
+            return False
+    except Exception:
+        pass
+
+    try:                                   # 兜底：整体重写（注释会丢失）
+        data = yaml.safe_load(orig_text)
+        if not isinstance(data, dict):
+            raise ValueError("config.yaml 顶层不是键值映射")
+    except Exception as e:
+        print(f"[config] config.yaml 无法解析（{e}），跳过「我/对方」账号名回填")
+        return False
+    people = data.setdefault("people", {})
+    for key in ("A", "B"):
+        if want[key] and isinstance(people.get(key), dict):
+            people[key]["match"] = want[key]
+    cfg_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8")
+    return True
+
+
 def root() -> Path:
     return ROOT
 

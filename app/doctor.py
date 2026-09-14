@@ -75,15 +75,29 @@ def run_doctor(source: Path) -> dict:
         report["reasons"].append(f"文件状态获取失败: {e}")
         return report
 
+    # ---- PDF：只识别不解析，直接给转存引导（不引第三方 PDF 库）----
+    if Path(source).suffix.lower() == ".pdf":
+        report["reasons"].append(
+            "PDF 里的文字是按绝对坐标排版的碎片，抽取后无法可靠还原「谁在什么时候说了什么」，"
+            "所以本项目不解析 PDF")
+        report["advice"].append(
+            "请先在原工具里改写为文本/Word 再导入：另存为 .txt（一行一条：时间 发送者: 内容）、"
+            "或另存为 .docx；也可以直接复制粘贴到 txt 后导入")
+        report["advice"].append(
+            "若只有 PDF，可先用系统自带「另存为文本」或任意 PDF 阅读器的「导出为文本」功能转一次")
+        report["verdict"] = "不支持 PDF 解析（请转存为 txt 或 docx）"
+        return report
+
     # ---- 格式识别 ----
     imp = registry.auto_detect(source)
     if imp is None:
         report["reasons"].append(
-            "所有内置导入器（chatlab/WeFlow JSONL、WeChatMsg CSV、Telegram JSON）"
-            "都无法识别该文件的表头/首行结构")
+            "所有内置导入器（chatlab/WeFlow JSONL、WeChatMsg CSV、Telegram JSON、"
+            "Word .docx、纯文本 txt/md）都无法识别该文件的结构")
         report["reasons"].append(
             "若是聊天导出，请确认来源：chatlab/WeFlow 导出 .jsonl；"
-            "WeChatMsg 导出 .csv；Telegram Desktop 导出 result.json")
+            "WeChatMsg 导出 .csv；Telegram Desktop 导出 result.json；"
+            "纯文本请保证「每行以 日期 时间 开头，后跟 发送者: 内容」")
         return report
     report["recognized"] = True
     report["importer"] = imp.source_name
@@ -129,6 +143,33 @@ def run_doctor(source: Path) -> dict:
     report["type_dist"] = {TYPE_LABELS.get(t, f"未知类型{t}"): n
                            for t, n in types.most_common()}
     report["privacy_estimate"] = _privacy_estimate(raw)
+
+    # ---- 纯文本 / Word：把启发式解析的「不确定量」如实摊开（宁可暴露也不藏）----
+    if st and ("appended_lines" in st or "skipped_no_ts" in st):
+        report["line_parse"] = {
+            "total_lines": st.get("total_lines"),
+            "parsed": st.get("parsed"),
+            "appended_lines": st.get("appended_lines"),
+            "skipped_no_ts": st.get("skipped_no_ts"),
+            "template": st.get("template"),
+            "images_seen": st.get("images"),
+            "tables": st.get("tables"),
+        }
+        if st.get("appended_lines"):
+            report["advice"].append(
+                f"{st['appended_lines']} 行没有时间戳，已按「上一条的续行」并入"
+                "（多行消息的正常现象）")
+        if st.get("skipped_no_ts"):
+            report["advice"].append(
+                f"{st['skipped_no_ts']} 行既无时间戳也不在消息内，已跳过——数量大说明"
+                "该文件排版不是「一行一条」，建议先规整成 txt 再导入")
+        if st.get("images"):
+            report["advice"].append(
+                f"文中有 {st['images']} 张图片不会进入聊天记录——图片请走「媒体导入」通道")
+        report["advice"].append(
+            "纯文本/Word 靠行内启发式识别时间与发送者：导入预览里的样例请逐条核对，"
+            "对不上就说明排版不符（模板：日期 时间 发送者: 内容）")
+
     if ts_list:
         report["time_span"] = {
             "first": _fmt_ts(min(ts_list)), "last": _fmt_ts(max(ts_list)),

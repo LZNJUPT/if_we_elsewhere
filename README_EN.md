@@ -81,10 +81,12 @@ IfWe is a **local-first** relationship timeline tool:
 | 🧠 Two-tier memory | Long-term memory (bi-temporal facts + optional local vector search) + short-term buffer with auto summarization; after a fork, the real future is "frozen" out of context |
 | 🕰 Timeline forks | Monthly message volume, 5-dimension relationship state, turning points (gaps / events / peaks) at a glance |
 | 🔀 IF-branch rewrite | Jump to any day + rewrite one sentence; the persona treats the rewrite as fact and carries on |
-| 🖼 Real stickers | The partner's actual stickers are replayed weighted by usage frequency (point `media.emojis_dir` at your export folder) |
+| 🔗 Multi-source merge | Same conversation scattered across apps? Import several records together (or over time): per-source A/B mapping, automatic merge by timestamp, cross-source dedup |
+| 📥 Five import formats | WeFlow JSONL / WeChatMsg CSV / Telegram JSON / plain text txt·md (incl. GBK) / Word .docx; a read-only "doctor" tells you up front whether a file imports and what it will look like |
+| 🖼 Real stickers | Stickers and images use a separate media channel: drag & drop, or point at a local folder to bulk-import; auto-linked to messages by filename, and the partner's actual stickers are replayed weighted by usage frequency |
 | 🔒 Local-first | Chats, analysis and the database all live in local SQLite; only reply generation sends sanitized context to *your own* LLM API |
 | 🖥 Fully graphical | Import → analyze (stage-by-stage progress, cancellable) → persona viewer → chat, no command line needed |
-| 👥 Multi-friend isolation | One data directory per friend (database / persona / stickers / conversations); fully separate, switchable any time |
+| 👥 Multi-friend isolation | One data directory per friend (database / persona / media / source archives / conversations); fully separate, switchable any time |
 | 🔐 Keys never in plaintext | API keys entered in the UI go to the Windows Credential Manager (DPAPI-encrypted file as fallback) — never into `config.yaml` |
 | 🧹 Sanitize on import | Phone numbers / addresses / IDs / bank cards are replaced with placeholders at import time; sanitized text is the only input for later stages |
 | 🛡 Privacy gate | Built-in `check_privacy.py`: scans the repo for privacy residue, exits non-zero on any hit (CI-ready) |
@@ -219,6 +221,7 @@ test of the packaged exe, and creates the GitHub Release. See [docs/RELEASE.md](
 ## Roadmap
 
 - [x] v0.2 more import formats (WeChatMsg, Telegram, import doctor, web wizard)
+- [x] v0.3 import pipeline v2 (multi-source merge by timestamp + cross-source dedup, txt/md/docx, separate media channel, data spec v2)
 - [x] v0.3 fully graphical flow (in-app analyze + progress, persona viewer, LLM settings, onboarding)
 - [x] v0.3 multi-friend isolation (one data directory per friend, registry, switch/delete/rename)
 - [x] v0.3 out-of-the-box Windows (pywebview shell + PyInstaller spec)

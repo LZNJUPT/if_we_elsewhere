@@ -92,6 +92,42 @@ IfWe 的目标是把「关系回溯 + 反事实推演」做成一个本地可跑
 阈值（默认 20）自然跨天；也可以手动推进。关系状态按天结算事件（同类型事件
 当天只计权一次，第二次衰减，第三次起不计），避免刷分。
 
+### 6. 导入链路 v2：多来源合并的设计取舍
+
+真实场景几乎不是「一次导出一份文件」——同一段对话可能微信那边导过一次、
+Telegram 那边也导过一次、后来又有人整理成 txt。所以导入被设计成**可累积**的。
+四个关键取舍：
+
+1. **库 = 全部已登记来源重建的结果**（而不是「在已有库上追加写入」）。
+   追加写入看起来更省事，但会带来「同一份文件导两次就翻倍」「移除某来源要逆向减
+   统计」这类幂等性泥潭。改成「登记来源 → 整体重建」后，语义变成
+   *同源同参 → 结果确定*，来源可单独移除、可替换，代价是必须留源存档
+   （`import_sources.py` + `sources/`），以及每次导入都要重跑一遍全量解析。
+   聊天记录的量级下这个代价可以接受。
+2. **逐源映射 A/B**，而不是全局一组账号名。不同应用的账号名天然不同
+   （WeChat wxid / Telegram `from_id` / 纯文本里的昵称），用一套名字套所有来源
+   必然有一半映射不上，而映射不上的消息会被记为未知发送者并触发 G7 门禁。
+3. **跨源去重键 = 时间 + 发送者 + 内容哈希**，且**只对有确定性标识的消息生成**：
+   有文本用文本，无文本但有附件名用附件名，两者都没有（如无文件名的 `[图片]`）
+   返回 `None` 表示不去重。宁可漏去重也不误删——这是本项目「不猜测归类」原则
+   在去重上的延伸。
+4. **映射一致性自查**。A/B 选反时去重会**静默失效**（发送者不同 → 去重键不同 →
+   同一句话被当成两条），这是最难自己发现的错误。所以去重之后会再扫一遍：
+   若同一「时间 + 内容」仍同时出现在 A 与 B 两侧，几乎只有一个解释——某份来源
+   选反了。这条判断以 `map_conflicts` 暴露到预览与门禁里，命令行与网页都会告警。
+
+配套的结构变更（数据规范 v1 → v2）：`messages` 增 `source_id`（来源登记 id）与
+`dedup_key`；新增 `import_sources`（来源台账）、`media`（媒体索引）、
+`message_media`（消息↔媒体关联）。旧库首次访问由
+`phase1_ingest.ensure_v2_schema()` 幂等补列建索引，无需手动迁移。
+
+**媒体为什么是另一条通道**：聊天记录里的表情包只是一个文件名，真正的图片文件
+往往在另一次导出里、甚至散落在用户自己收集的文件夹里。所以媒体单独导入
+（`media_store.py`），按内容哈希存档去重，再靠**文件名精确匹配**与消息关联
+（匹配不上留空）。`/api/media/{name}` 因此从「只认 32 位 hex 文件名」改为
+「先查媒体索引，再回退旧 `media.emojis_dir` 约定」。
+注意媒体**不做脱敏**（原始二进制），也**不参与任何分析或 LLM 调用**。
+
 ## 目录结构
 
 ```
@@ -100,7 +136,16 @@ if_we_elsewhere/
 ├── config.example.yaml     # 配置模板（复制为 config.yaml）
 ├── app/
 │   ├── config.py           # 配置加载器（env > yaml > 默认值）
-│   ├── phase1_ingest.py    # 导入/脱敏/会话化/门禁（库）
+│   ├── phase1_ingest.py    # 导入/脱敏/会话化/门禁（库）+ v2 多源合并（_assemble/plan_merge/ingest_many）
+│   ├── importers/          # 格式适配器（插件式，按注册序自动探测）
+│   │   ├── chatlab_jsonl.py    # WeFlow JSONL / 通用 CSV
+│   │   ├── wecomsg_csv.py      # WeChatMsg(MemoTrace) CSV
+│   │   ├── telegram_json.py    # Telegram Desktop 官方导出 JSON
+│   │   ├── docx_text.py        # Word .docx（标准库 zipfile+ElementTree，零依赖）
+│   │   └── plaintext_lines.py  # txt/md/log 行流启发式（docx 复用其解析）
+│   ├── import_sources.py   # 已导入来源登记 + 源存档（库由全部来源重建）
+│   ├── media_store.py      # 媒体（表情包/图片）存档、索引与消息关联
+│   ├── doctor.py           # 导入体检（只读，不写库）
 │   ├── phase2_llm.py       # LLM 结构化输出鲁棒层（json_object+修复+重试）
 │   ├── phase4_retrieval.py # 记忆检索（bigram+IDF+可选向量, 双时态, 遗忘/强化）
 │   ├── phase5_common.py    # 模拟时钟/世界状态/分支记忆融合
@@ -111,7 +156,7 @@ if_we_elsewhere/
 │   ├── phase15_dial_engine.py # 对话内核（你上场 + 数字人格）
 │   ├── phase15_api.py      # FastAPI 服务层
 │   ├── phase15_web/        # 前端（零构建原生三件套）
-│   └── schema*.sql         # 全部 DDL（幂等执行）
+│   └── schema*.sql         # 全部 DDL（幂等执行；v1 基础 + v2 增量）
 ├── scripts/
 │   ├── import_chat.py      # 导入 CLI
 │   └── check_privacy.py    # 隐私扫描门禁

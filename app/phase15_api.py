@@ -34,7 +34,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 import config as cfg_mod
 import phase1_ingest as p1
@@ -45,6 +45,8 @@ import profiles as profiles_mod
 import secret_store
 from doctor import run_doctor
 from importers import registry as importer_registry
+import import_sources
+import media_store
 from phase15_dial_engine import (AUTO_DAY_TURNS, get_default_start, DialEngine,
                                  _dial_lines, new_line)
 from phase5_llm import get_client
@@ -364,21 +366,29 @@ def _sniff_mime(p: Path) -> str:
 
 @app.get("/api/media/{name}")
 def api_media(name: str):
-    """表情包文件（仅允许 32 位 hex + 图片扩展名，杜绝路径穿越）"""
-    if not MEDIA_NAME.match(name):
+    """媒体文件（表情包 / 图片）。
+
+    v0.3 解析顺序：
+      1. 先查媒体索引表（自己导入的表情包 / 图片，任意文件名都行）；
+      2. 再回退旧的 `config media.emojis_dir`（32 位 hex 命名的历史约定）。
+    文件名做了净化，且索引表里的路径由我们自己生成 → 无路径穿越。
+    """
+    n = media_store.safe_name(name)
+    if not n:
         raise HTTPException(400, "非法文件名")
-    base = cfg_mod.emojis_dir()
-    if base is None:
-        raise HTTPException(404, "未配置表情包目录（config.yaml media.emojis_dir）")
-    p = base / name
-    try:
-        if not p.is_file():
-            raise HTTPException(404, "文件不存在")
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(404, "文件不可读")
-    return FileResponse(str(p), media_type=_sniff_mime(p))
+    p = media_store.resolve(n)
+    if p is not None:
+        return FileResponse(str(p), media_type=_sniff_mime(p))
+    if MEDIA_NAME.match(n):                      # 兼容旧配置：WeFlow 导出的 32 位 hex 命名
+        base = cfg_mod.emojis_dir()
+        if base is not None:
+            legacy = base / n
+            try:
+                if legacy.is_file():
+                    return FileResponse(str(legacy), media_type=_sniff_mime(legacy))
+            except Exception:
+                pass
+    raise HTTPException(404, "图片不在媒体库里（可在「媒体导入」里把它加进来）")
 
 
 @app.get("/api/history")
@@ -508,37 +518,114 @@ def api_delete_line(sim_id: str):
     return {"ok": True}
 
 
-# ================================================================ Web 导入向导（v0.2 O-5f）
+# ================================================================ Web 导入向导（v0.3 · 多源合并）
 #
-# 生命周期：upload（落临时文件 + 取 .lock）→ preview（体检+A/B 候选+脱敏样例）
-#           → commit（完整 ingest+门禁）→ **链路结束（含异常路径）立即删除临时文件与锁**。
-# 安全：仅本机 127.0.0.1；响应不含服务器路径；预览只回统计 + 每方前 3 条脱敏样例；
-#       白名单扩展名 + ≤50MB + import_id 严格 hex 校验 + 同时仅一个导入任务。
+# 生命周期：upload（多文件落临时目录，记为一个 batch + 取 .lock）
+#        → preview（逐份体检 + 合并预览 + 逐源选 A/B）
+#        → merge（改了 A/B 后重算合并预览，只读不写库）
+#        → commit（源存档 → 从**全部已登记来源**重建库 → 媒体关联）
+#        → 链路结束（含异常路径）立即删除临时文件与锁。
+#
+# v2 关键语义：库永远是「全部已登记来源」重建出来的结果。追加一份新来源不会丢掉
+# 旧来源 —— 这是「不同应用各自导出、再按时间自动合并」的基础。来源存档与登记表见
+# import_sources.py，界面可查看 / 单独移除任一来源。移除来源同样会触发一次重建。
+#
+# 安全：仅本机 127.0.0.1；响应不含服务器路径；白名单扩展名 + 单份 ≤50MB +
+#       单批 ≤12 份 + batch_id/import_id 严格 hex 校验 + 同时仅一个导入任务。
 IMPORT_MAX_BYTES = 50 * 1024 * 1024
-IMPORT_ALLOWED_EXTS = {".jsonl", ".json", ".csv"}
+IMPORT_MAX_FILES = 12
+IMPORT_REQUEST_MAX_BYTES = 256 * 1024 * 1024
+IMPORT_ALLOWED_EXTS = {".jsonl", ".json", ".csv", ".txt", ".md", ".log", ".docx", ".pdf"}
+IMPORT_EXTS_TEXT = ".jsonl / .json / .csv / .txt / .md / .log / .docx（PDF 会给出转存引导）"
 IMPORT_STALE_S = 3600                                    # 锁/临时文件过期回收阈值
 _import_mutex = _op_lock                                 # 与分析/好友切换共用同一把互斥锁
+MEDIA_MAX_FILES = 300
+MEDIA_REQUEST_MAX_BYTES = 256 * 1024 * 1024
 
 
-def _import_tmp_dir() -> Path:
-    """导入临时目录（随当前好友的数据目录走；data/ 已 gitignore，绝不入库）"""
+def _tmp_root() -> Path:
+    """导入临时根目录（随当前好友的数据目录走；data/ 已 gitignore，绝不入库）"""
     return cfg_mod.data_dir() / "tmp_import"
 
 
-class ImportPreviewBody(BaseModel):
-    import_id: str
+def _import_tmp_dir() -> Path:
+    return _tmp_root()
 
 
-class ImportCommitBody(BaseModel):
+def _media_tmp_dir() -> Path:
+    return _tmp_root() / "media"
+
+
+class ImportRefBody(BaseModel):
+    """定位参数：新接口用 batch_id；兼容旧的单文件 import_id。
+
+    exclude：本批里被用户剔除的 import_id（前端「移除这份」按钮），不参与预览/合并/导入。
+    extra="forbid"：字段名写错要当场 422。这里被坑过一次 —— 少一个字面拼写差异
+    会让 pydantic 静默忽略整段字段，问题一路漂到用户面前才以「莫名其妙」的形式出现。
+    """
+    model_config = ConfigDict(extra="forbid")
+    batch_id: str | None = None
+    import_id: str | None = None
+    exclude: list[str] = []
+
+
+class ImportPreviewBody(ImportRefBody):
+    pass
+
+
+class ImportSourceSel(BaseModel):
+    """一份来源的 A/B 映射。
+
+    `sender_a/sender_b` 与 `a/b` 两种写法都收：界面一度发的是 `{import_id, a, b}`，
+    pydantic 默认忽略未知字段 → 映射被读成空串 → 用户看到的却是
+    「「telegram_result.json」还没选 A/B 双方账号」（2026-09-14 实测复现）。
+    现在显式收下两种写法，其余字段一律 422。
+    """
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
     import_id: str
-    sender_a: str
-    sender_b: str
+    sender_a: str = Field("", validation_alias=AliasChoices("sender_a", "a"))
+    sender_b: str = Field("", validation_alias=AliasChoices("sender_b", "b"))
+
+
+class ImportMergeBody(ImportRefBody):
+    sources: list[ImportSourceSel] = []
+
+
+class ImportCommitBody(ImportRefBody):
+    sender_a: str | None = None          # 单源旧调用兼容
+    sender_b: str | None = None
     session_gap_minutes: int | None = None
+    sources: list[ImportSourceSel] = []
+
+
+# ---------------------------------------------------------------- 锁 / 批次
+def _hex32(value: str | None) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", value or ""):
+        raise HTTPException(400, "非法 id")
+    return value or ""
+
+
+def _batch_read() -> dict | None:
+    try:
+        d = json.loads((_import_tmp_dir() / ".lock").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _lock_read() -> dict | None:                 # 兼容旧的调用名
+    return _batch_read()
+
+
+def _lock_write(meta: dict) -> None:
+    d = _import_tmp_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".lock").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
 def _import_file(import_id: str) -> Path:
-    if not re.fullmatch(r"[0-9a-f]{32}", import_id or ""):
-        raise HTTPException(400, "非法 import_id")
+    """按 import_id 取回某个临时文件（import_id 严格 hex，杜绝路径穿越）。"""
+    _hex32(import_id)
     tmp_dir = _import_tmp_dir()
     if not tmp_dir.is_dir():
         raise HTTPException(404, "临时文件不存在（已过期或已完成）")
@@ -548,27 +635,28 @@ def _import_file(import_id: str) -> Path:
     return files[0]
 
 
-def _lock_read() -> dict | None:
-    try:
-        return json.loads((_import_tmp_dir() / ".lock").read_text(encoding="utf-8"))
-    except Exception:
-        return None
+def _import_cleanup(import_ids: list[str] | None = None) -> None:
+    """删 .lock + 指定 import_id 的临时文件；import_ids=None 时清空临时目录。
 
-
-def _lock_write(meta: dict) -> None:
-    (_import_tmp_dir() / ".lock").write_text(
-        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-
-
-def _import_cleanup(import_id: str | None = None) -> None:
-    """逐文件 unlink（本机 safe-delete 对目录级删除 fail-closed，勿整目录删）。"""
+    本机 safe-delete 对目录级删除 fail-closed，所以一律逐文件 unlink。
+    """
     tmp_dir = _import_tmp_dir()
     try:
         (tmp_dir / ".lock").unlink()
     except OSError:
         pass
-    if import_id and tmp_dir.is_dir():
-        for p in tmp_dir.glob(import_id + ".*"):
+    if not tmp_dir.is_dir():
+        return
+    if import_ids is None:
+        for p in tmp_dir.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        return
+    for iid in import_ids:
+        for p in tmp_dir.glob(f"{iid}.*"):
             try:
                 p.unlink()
             except OSError:
@@ -579,138 +667,632 @@ def _purge_stale_import() -> None:
     """回收超时锁与孤儿临时文件（客户端中途放弃的兜底）。"""
     tmp_dir = _import_tmp_dir()
     lockp = tmp_dir / ".lock"
-    if lockp.exists():
-        age = time.time() - lockp.stat().st_mtime
-        if age > IMPORT_STALE_S:
-            _import_cleanup()
+    if lockp.exists() and time.time() - lockp.stat().st_mtime > IMPORT_STALE_S:
+        _import_cleanup()
     if tmp_dir.is_dir():
         for p in tmp_dir.iterdir():
-            if p.name == ".lock":
-                continue
-            if time.time() - p.stat().st_mtime > IMPORT_STALE_S:
+            if p.is_file() and p.name != ".lock" and \
+                    time.time() - p.stat().st_mtime > IMPORT_STALE_S:
                 try:
                     p.unlink()
                 except OSError:
                     pass
 
 
-def _extract_upload(request: Request, body: bytes) -> tuple[bytes, str]:
-    """支持 multipart/form-data（手写解析，零新增依赖）与裸 octet-stream 两种上传。"""
+def _resolve_batch(body: ImportRefBody) -> tuple[str, dict]:
+    """按 batch_id 或批内任一 import_id 定位当前批次。"""
+    lock = _batch_read()
+    if not lock:
+        raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
+    files = lock.get("files") or []
+    given = ((body.batch_id or body.import_id) or "").strip()
+    if given != lock.get("batch_id") and not any(f.get("import_id") == given for f in files):
+        raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
+    return str(lock.get("batch_id") or ""), lock
+
+
+def _extract_uploads(request: Request, body: bytes) -> list[tuple[bytes, str]]:
+    """支持 multipart/form-data（**可含多个文件段**，手写解析零依赖）与裸 octet-stream。"""
     ctype = request.headers.get("content-type", "")
-    if ctype.startswith("multipart/"):
-        m = re.search(r'boundary="?([^";]+)"?', ctype)
-        if not m:
-            raise HTTPException(400, "multipart 缺少 boundary")
-        sep = b"--" + m.group(1).encode()
-        for seg in body.split(sep)[1:]:
-            if seg.strip(b"\r\n-") == b"":
-                continue
-            if b"\r\n\r\n" in seg:
-                head, _, payload = seg.partition(b"\r\n\r\n")
-                headers = head.decode("utf-8", "replace")
-                if 'filename="' in headers:
-                    fm = re.search(r'filename="([^"]*)"', headers)
-                    if payload.endswith(b"\r\n"):
-                        payload = payload[:-2]
-                    return payload, (fm.group(1) if fm else "")
+    if not ctype.startswith("multipart/"):
+        return [(body, request.query_params.get("filename", ""))] if body else []
+    m = re.search(r'boundary="?([^";]+)"?', ctype)
+    if not m:
+        raise HTTPException(400, "multipart 缺少 boundary")
+    sep = b"--" + m.group(1).encode()
+    out: list[tuple[bytes, str]] = []
+    for seg in body.split(sep)[1:]:
+        if seg.strip(b"\r\n-") == b"" or b"\r\n\r\n" not in seg:
+            continue
+        head, _, payload = seg.partition(b"\r\n\r\n")
+        fm = re.search(r'filename="([^"]*)"',
+                       head.decode("utf-8", "replace"))
+        if not fm:
+            continue
+        if payload.endswith(b"\r\n"):
+            payload = payload[:-2]
+        out.append((payload, fm.group(1)))
+    if not out:
         raise HTTPException(400, "multipart 中未找到文件字段")
-    return body, request.query_params.get("filename", "")
+    return out
 
 
+def _ts_pair(span: dict | None) -> tuple[int | None, int | None]:
+    """doctor 的 time_span（ISO 字符串）→ (first_ts, last_ts) 秒级整数。"""
+    if not span:
+        return None, None
+    from datetime import datetime as _dt
+
+    def _p(v):
+        try:
+            return int(_dt.fromisoformat(v).timestamp())
+        except Exception:
+            return None
+    return _p(span.get("first")), _p(span.get("last"))
+
+
+def _batch_files(lock: dict, exclude: list[str] | None = None) -> list[dict]:
+    """批次里参与本次操作的文件（剔除被用户移除的）。"""
+    ex = set(exclude or [])
+    return [f for f in (lock.get("files") or []) if f.get("import_id") not in ex]
+
+
+def _sel_map(lock: dict, body: ImportCommitBody) -> dict[str, tuple[str, str]]:
+    """逐源 A/B 映射：优先 body.sources；否则把 body.sender_a/b 套用到全部来源。"""
+    files = _batch_files(lock, body.exclude)
+    sel: dict[str, tuple[str, str]] = {}
+    for s in (body.sources or []):
+        sel[s.import_id] = ((s.sender_a or "").strip(), (s.sender_b or "").strip())
+    if not sel and (body.sender_a or body.sender_b):
+        pair = ((body.sender_a or "").strip(), (body.sender_b or "").strip())
+        for f in files:
+            sel[f["import_id"]] = pair
+    return sel
+
+
+def _batch_specs(lock: dict, sel: dict[str, tuple[str, str]],
+                 exclude: list[str] | None = None) -> list[dict]:
+    """把批次里的临时文件拼成 ingest_many 的输入（含逐源映射校验）。"""
+    specs = []
+    for f in _batch_files(lock, exclude):
+        iid = f["import_id"]
+        a, b = sel.get(iid, ("", ""))
+        if not a or not b:
+            raise HTTPException(400, f"「{f['filename']}」还没选 A/B 双方账号")
+        if a == b:
+            raise HTTPException(400, f"「{f['filename']}」的你/对方不能是同一个账号")
+        specs.append({"path": _import_file(iid), "sender_map": {a: "A", b: "B"},
+                      "name": f["filename"], "importer": None})
+    return specs
+
+
+# ---------------------------------------------------------------- 上传
 @app.post("/api/import/upload")
 async def api_import_upload(request: Request):
+    """接收一批来源文件（1~12 份，可来自不同应用/格式），落临时目录并取锁。"""
     _require_no_analyze("导入记录")
     raw = await request.body()
     with _import_mutex:
         _purge_stale_import()
-        if _lock_read() is not None:
-            raise HTTPException(409, "已有导入任务进行中，请稍后再试")
-        data, filename = _extract_upload(request, raw)
-        if not data:
-            raise HTTPException(400, "上传内容为空")
-        if len(data) > IMPORT_MAX_BYTES:
-            raise HTTPException(413, "文件超过 50MB 上限")
-        ext = Path(filename or "").suffix.lower()
-        if ext not in IMPORT_ALLOWED_EXTS:
-            raise HTTPException(400, "仅支持 .jsonl / .json / .csv 文件")
+        # 上一个批次多半是「被放弃」的：用户关掉向导、刷新页面、或预览面板重载 —— 请求
+        # 没走完，服务端的锁就留在那儿。本机单用户场景下，**新上传直接接管**，而不是让
+        # 用户对着 409 干等一小时（用户可以接受「新上传覆盖旧批次」，不能接受「卡住」）。
+        stale = _batch_read()
+        reclaimed = False
+        if stale is not None:
+            old_ids = [f.get("import_id") for f in (stale.get("files") or [])]
+            _import_cleanup(old_ids or None)
+            reclaimed = True
+            print(f"[i] 回收上一个未完成的导入批次（{len(old_ids)} 份临时文件）")
+        if len(raw) > IMPORT_REQUEST_MAX_BYTES:
+            raise HTTPException(413, "本次上传体积过大，请分批导入")
+        items = _extract_uploads(request, raw)
+        if len(items) > IMPORT_MAX_FILES:
+            raise HTTPException(400, f"单次最多 {IMPORT_MAX_FILES} 份文件；"
+                                     f"更多请分两批导入（第二批会与已导入的来源自动合并）")
         tmp_dir = _import_tmp_dir()
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        import_id = uuid.uuid4().hex
-        tmp = tmp_dir / (import_id + ext)
+        batch_id = uuid.uuid4().hex
+        files: list[dict] = []
         try:
-            tmp.write_bytes(data)
-            _lock_write({"import_id": import_id, "filename": Path(filename).name,
-                         "created": time.time()})
-        except OSError as e:
-            _import_cleanup(import_id)
-            raise HTTPException(500, f"落盘失败: {e}")
-        return {"import_id": import_id, "filename": Path(filename).name,
-                "size": len(data)}
+            seen: set[str] = set()
+            for data, filename in items:
+                name = safe_filename(filename)
+                ext = Path(name).suffix.lower()
+                if not data:
+                    raise HTTPException(400, f"「{name or '未命名文件'}」内容为空")
+                if len(data) > IMPORT_MAX_BYTES:
+                    raise HTTPException(413, f"「{name}」超过单份 50MB 上限")
+                if ext not in IMPORT_ALLOWED_EXTS:
+                    raise HTTPException(400, f"「{name}」格式不支持：仅接受 {IMPORT_EXTS_TEXT}")
+                if name in seen:
+                    raise HTTPException(400, f"本批里有重名文件「{name}」，请先改名再上传")
+                seen.add(name)
+                iid = uuid.uuid4().hex
+                (tmp_dir / (iid + ext)).write_bytes(data)
+                files.append({"import_id": iid, "filename": name, "ext": ext,
+                              "size": len(data)})
+            _lock_write({"batch_id": batch_id, "files": files, "created": time.time()})
+        except BaseException:
+            _import_cleanup([f["import_id"] for f in files])
+            raise
+        return {"batch_id": batch_id, "files": files, "count": len(files),
+                "reclaimed": reclaimed,
+                "import_id": files[0]["import_id"] if len(files) == 1 else None}
 
 
+def safe_filename(name: str) -> str:
+    return Path((name or "").replace("\\", "/")).name.strip()[:120]
+
+
+@app.post("/api/import/cancel")
+def api_import_cancel():
+    """放弃当前批次：释放锁并删除临时文件。
+
+    向导的「← 重新上传」和关闭弹窗都会调它。没有这个接口的话，用户上传后直接
+    关掉向导会留下锁，之后整整一小时（IMPORT_STALE_S）都无法再上传新文件。
+    """
+    with _import_mutex:
+        lock = _batch_read()
+        ids = [f.get("import_id") for f in (lock.get("files") or [])] if lock else []
+        _import_cleanup(ids or None)
+        return {"ok": True, "released": bool(lock), "files": len(ids)}
+
+
+# ---------------------------------------------------------------- 预览
 @app.post("/api/import/preview")
 def api_import_preview(body: ImportPreviewBody):
+    """逐份体检（格式/条数/跨度/候选账号/脱敏预估/样例）+ 合并预览（暂用体检建议映射）。
+
+    单个文件认不出来 → **保留锁**，让用户在第二步点「移除本份」后继续（这是可操作状态）。
+    请求整体出错（服务端自身异常）→ **释放锁**，否则用户会被一个自己无法解除的锁
+    挡在门外（表现为「导入正在进行中」且怎么点都没用）。
+    """
     with _import_mutex:
-        if not _lock_read() or _lock_read().get("import_id") != body.import_id:
-            raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
-        src = _import_file(body.import_id)
+        _bid, lock0 = _resolve_batch(body)
+        ids0 = [f.get("import_id") for f in (lock0.get("files") or [])]
         try:
-            report = run_doctor(src)
-            candidates = report.get("candidates") or []
-            # 每方前 3 条脱敏样例（content_clean，不含原文 PII）
-            samples: dict[str, list] = {}
-            imp = (importer_registry.by_name(report["importer"])
-                   if report.get("importer") else None)
-            if imp is not None:
+            _bid, lock = _resolve_batch(body)
+            items = []
+            sel: dict[str, tuple[str, str]] = {}
+            for f in _batch_files(lock, body.exclude):
+                src = _import_file(f["import_id"])
                 try:
-                    for rec in imp.parse(src):
-                        acct = rec.get("accountName") or "(空账号名)"
-                        bucket = samples.setdefault(acct, [])
-                        if len(bucket) < 3:
-                            text, _ = p1.mask_privacy(p1.clean_text(rec.get("content") or ""))
-                            bucket.append({"type": rec.get("type"),
-                                           "text": text[:200] or "[无文本内容]"})
-                except Exception:
-                    pass                    # 样例尽力而为，报告本身已含错误信息
-            for c in candidates:
-                c["samples"] = samples.get(c["account"], [])
+                    report = run_doctor(src)
+                except Exception as e:
+                    report = {"source_file": f["filename"], "recognized": False,
+                              "importable": False, "reasons": [f"体检失败：{str(e)[:160]}"],
+                              "candidates": [], "advice": []}
+                candidates = report.get("candidates") or []
+                _attach_samples(src, report, candidates)
+                # 默认映射：config 里登记过的「我/对方」优先，其次才是体检的统计猜测
+                pair, src_of = None, ""
+                pref = _preferred_mapping(candidates)
+                if pref:
+                    pair, src_of = (pref["sender_a"], pref["sender_b"]), "config"
+                else:
+                    sug = report.get("suggested_args") or {}
+                    if sug.get("sender_a") and sug.get("sender_b"):
+                        pair, src_of = (sug["sender_a"], sug["sender_b"]), "guess"
+                if pair:
+                    report["mapping_default"] = {"sender_a": pair[0], "sender_b": pair[1],
+                                                 "source": src_of}
+                    sel[f["import_id"]] = pair
+                items.append({"import_id": f["import_id"], "filename": f["filename"],
+                              "size": f["size"], "report": report,
+                              "candidates": candidates})
+            # 合并预览：只用能识别出格式、且能凑出两个候选账号的来源
+            merge, merge_error = None, ""
+            try:
+                specs = []
+                for it in items:
+                    if not (it["report"].get("recognized")
+                            and it["report"].get("message_count")):
+                        continue
+                    pair = sel.get(it["import_id"])
+                    if not pair:
+                        continue
+                    specs.append({"path": _import_file(it["import_id"]),
+                                  "sender_map": {pair[0]: "A", pair[1]: "B"},
+                                  "name": it["filename"], "importer": None})
+                if specs:
+                    merge = p1.plan_merge(specs)
+                    merge["provisional"] = True   # 用的是体检建议映射，改选后走 /merge 重算
+            except (SystemExit, Exception) as e:     # SystemExit 不是 Exception 子类
+                merge_error = str(e)[:200]
+            return {"batch_id": lock.get("batch_id"), "items": items,
+                    "merge": merge, "merge_error": merge_error,
+                    "registered": import_sources.list_view(),
+                    "media": _media_stats_safe()}
+        except HTTPException:
+            raise
+        except BaseException as e:
+            _import_cleanup(ids0)
+            raise HTTPException(500, f"预览失败（已释放导入会话，可重试）：{str(e)[:200]}")
+
+
+def _match_names(v) -> list[str]:
+    """people.A/B.match 可能是字符串或列表 → 统一成名字列表。"""
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [str(v).strip()] if v else []
+
+
+def _preferred_mapping(candidates: list[dict]) -> dict:
+    """给一份来源推荐 A/B 映射：**优先用 config 里已登记的「我 / 对方」账号名**。
+
+    为什么不能直接用体检建议：`doctor.suggested_args` 是「消息较多的一方 = A」，
+    纯统计猜测。对方话多时它会**把 A 选成对方**，而 A/B 选反会让这份来源的说话人
+    整体颠倒（传导到关系五维、人格档案、推演语料），且多份来源一致选反时
+    `map_conflicts` 抓不到。config.yaml 的 people.A/B.match 是用户自己的登记
+    （支持列表，可登记多个来源的账号名），命中就优先用它。
+    """
+    names = [c.get("account") for c in (candidates or []) if c.get("account")]
+    if len(names) < 2:
+        return {}
+    people = cfg_mod.load()["people"]
+    a_hits = [n for n in names if n in _match_names(people.get("A", {}).get("match"))]
+    b_hits = [n for n in names if n in _match_names(people.get("B", {}).get("match"))]
+    if a_hits and b_hits and a_hits[0] != b_hits[0]:
+        return {"sender_a": a_hits[0], "sender_b": b_hits[0], "source": "config"}
+    return {}
+
+
+def _attach_samples(src: Path, report: dict, candidates: list) -> None:
+    """给每个候选账号附上前 3 条脱敏样例（只看 content_clean，不含原文 PII）。"""
+    imp = (importer_registry.by_name(report["importer"])
+           if report.get("importer") else None)
+    if imp is None or not candidates:
+        return
+    samples: dict[str, list] = {}
+    try:
+        for rec in imp.parse(src):
+            acct = rec.get("accountName") or "(空账号名)"
+            bucket = samples.setdefault(acct, [])
+            if len(bucket) < 3:
+                text, _ = p1.mask_privacy(p1.clean_text(rec.get("content") or ""))
+                bucket.append({"type": rec.get("type"),
+                               "text": text[:200] or "[无文本内容]"})
+    except Exception:
+        return                              # 样例尽力而为，报告本身已含错误信息
+    for c in candidates:
+        c["samples"] = samples.get(c["account"], [])
+
+
+@app.post("/api/import/merge")
+def api_import_merge(body: ImportMergeBody):
+    """按用户当前选定的逐源 A/B 重算合并预览（只读，不写库）。"""
+    with _import_mutex:
+        _bid, lock = _resolve_batch(body)
+        sel = {s.import_id: ((s.sender_a or "").strip(), (s.sender_b or "").strip())
+               for s in (body.sources or [])}
+        specs = []
+        skipped = []
+        for f in _batch_files(lock, body.exclude):
+            pair = sel.get(f["import_id"])
+            if not pair or not pair[0] or not pair[1] or pair[0] == pair[1]:
+                skipped.append(f["filename"])
+                continue
+            specs.append({"path": _import_file(f["import_id"]),
+                          "sender_map": {pair[0]: "A", pair[1]: "B"},
+                          "name": f["filename"], "importer": None})
+        if not specs:
+            raise HTTPException(400, "还没有任何一份来源选好了 A/B 双方账号")
+        try:
+            merge = p1.plan_merge(specs)
+        except SystemExit as e:
+            raise HTTPException(400, str(e))
         except Exception as e:
-            _import_cleanup(body.import_id)          # 预览失败即清理
-            raise HTTPException(500, f"预览失败: {str(e)[:200]}")
-        if not report.get("recognized"):
-            _import_cleanup(body.import_id)          # 无法识别的文件直接清理
-        return {"import_id": body.import_id, "report": report,
-                "candidates": candidates}
+            raise HTTPException(500, f"合并预览失败：{str(e)[:200]}")
+        merge["provisional"] = False
+        merge["skipped"] = skipped
+        return {"merge": merge}
 
 
+# ---------------------------------------------------------------- 提交
 @app.post("/api/import/commit")
 def api_import_commit(body: ImportCommitBody):
+    """归档本批来源 → 从**全部已登记来源**重建库 → 关联媒体 → 报告。"""
     _require_no_analyze("导入记录")
-    sender_a = (body.sender_a or "").strip()
-    sender_b = (body.sender_b or "").strip()
-    if not sender_a or not sender_b:
-        raise HTTPException(400, "需要选择 A/B 双方账号")
-    if sender_a == sender_b:
-        raise HTTPException(400, "A/B 不能是同一个账号")
     with _import_mutex:
-        lock = _lock_read()
-        if not lock or lock.get("import_id") != body.import_id:
-            raise HTTPException(409, "导入会话不存在或已失效，请重新上传")
-        src = _import_file(body.import_id)
-        gap_minutes = body.session_gap_minutes or \
-            int(cfg_mod.load()["chat"]["session_gap_minutes"])
+        _bid, lock = _resolve_batch(body)
+        files = _batch_files(lock, body.exclude)
+        if not files:
+            raise HTTPException(409, "这一批没有可导入的文件（都被移除了？），请重新上传")
+        sel = _sel_map(lock, body)
+        specs = _batch_specs(lock, sel, body.exclude)   # 逐源映射校验（缺 A/B 直接 400）
+        tmp_ids = [f["import_id"] for f in files]
         try:
-            summary = p1.ingest(src, {sender_a: "A", sender_b: "B"},
-                                db_path=cfg_mod.db_path(),
-                                session_gap_s=gap_minutes * 60)
+            # 1) 逐份体检 → 归档登记（体检不合格的不入库，直接报错让用户移除）
+            for f, spec in zip(files, specs):
+                src = spec["path"]
+                report = run_doctor(src)
+                if not report.get("recognized") or not (report.get("message_count") or 0):
+                    raise HTTPException(
+                        400, f"「{f['filename']}」解析不出消息"
+                             f"（{report.get('verdict') or '格式未识别'}）——请把它移出本批")
+                a, b = sel[f["import_id"]]
+                first_ts, last_ts = _ts_pair(report.get("time_span"))
+                import_sources.add_source(
+                    src, f["filename"], report.get("importer") or "", {a: "A", b: "B"},
+                    message_count=report.get("message_count") or 0,
+                    first_ts=first_ts, last_ts=last_ts)
+            # 2) 从全部已登记来源重建（含历史批次 → 自动按时间合并）
+            all_specs, missing = import_sources.build_source_specs()
+            if not all_specs:
+                raise HTTPException(500, "来源登记为空，无法重建（请重新上传）")
+            gap_minutes = body.session_gap_minutes or \
+                int(cfg_mod.load()["chat"]["session_gap_minutes"])
+            print(f"[i] 从 {len(all_specs)} 份已登记来源重建库"
+                  f"（本批新增/更新 {len(files)} 份，映射 {sel}）")
+            summary = p1.ingest_many(all_specs, db_path=cfg_mod.db_path(),
+                                     session_gap_s=gap_minutes * 60)
+            # 3) 媒体关联（有已导入媒体时才有意义；失败不阻塞导入）
+            try:
+                link = media_store.link_messages()
+            except Exception as e:
+                link = {"linked": 0, "candidates": 0, "unmatched": 0, "error": str(e)[:120]}
+        except HTTPException:
+            _import_cleanup(tmp_ids)
+            raise
         except (SystemExit, Exception) as e:
+            _import_cleanup(tmp_ids)
             raise HTTPException(500, f"导入失败: {str(e)[:300]}")
         finally:
-            _import_cleanup(body.import_id)          # 链路结束（含失败）立即清理
-        for sid in list(_engines):                   # 旧库已被重建，缓存引擎全部失效
-            _drop_engine(sid)
-        _schema_ready.clear()                        # 库被全量重建，结构需重新确认
-        return {"ok": True, "summary": summary}
+            _import_cleanup(tmp_ids)
+        _reset_caches()                              # 库被全量重建 → 引擎/检索器缓存全失效
+        _schema_ready.clear()                        # 结构需重新确认
+        summary["registered_sources"] = len(all_specs)
+        summary["missing_sources"] = missing
+        # 记住本次的「我 / 对方」账号名 → 下次导入界面按登记名预选，不再靠消息条数猜
+        note = ""
+        try:
+            a_names = list(dict.fromkeys(v[0] for v in sel.values() if v[0]))
+            b_names = list(dict.fromkeys(v[1] for v in sel.values() if v[1]))
+            if cfg_mod.persist_sender_matches(a_names, b_names):
+                note = "已把本次的「我 / 对方」账号名记进 config.yaml（下次导入会按它预选）"
+        except Exception as e:
+            note = f"「我 / 对方」账号名回填 config.yaml 失败（不影响导入）：{str(e)[:80]}"
+        return {"ok": True, "summary": summary, "media_link": link,
+                "config_note": note,
+                "registered": import_sources.list_view()}
+
+
+# ---------------------------------------------------------------- 已登记来源管理
+@app.get("/api/import/sources")
+def api_import_sources():
+    return {"sources": import_sources.list_view(), "media": _media_stats_safe(),
+            "spec_version": p1.SPEC_VERSION}
+
+
+def _rebuild_from_sources() -> tuple[dict | None, list[str]]:
+    """按当前全部已登记来源重建一次库（来源管理类操作共用）。
+
+    返回 (summary, missing)；一份来源都不剩时清空库（persona 与媒体库保留）。
+    调用方需自行持有 _import_mutex。
+    """
+    all_specs, missing = import_sources.build_source_specs()
+    summary = None
+    if all_specs:
+        gap = int(cfg_mod.load()["chat"]["session_gap_minutes"])
+        try:
+            summary = p1.ingest_many(all_specs, db_path=cfg_mod.db_path(),
+                                     session_gap_s=gap * 60)
+        except (SystemExit, Exception) as e:
+            raise HTTPException(500, f"重建失败: {str(e)[:300]}")
+    else:
+        try:
+            cfg_mod.db_path().unlink()
+        except OSError:
+            pass
+    _reset_caches()
+    _schema_ready.clear()
+    return summary, missing
+
+
+class SourceMappingBody(BaseModel):
+    """修正一份来源的 A/B 映射。默认动作是「对调」；也可显式给出 sender_a/sender_b。"""
+    model_config = ConfigDict(extra="forbid")
+    sender_a: str = ""
+    sender_b: str = ""
+
+
+@app.post("/api/import/sources/{source_id}/mapping")
+def api_import_source_mapping(source_id: str, body: SourceMappingBody):
+    """修正一份已导入来源的 A/B 映射，并立刻按全部来源重建库。
+
+    为什么需要它：A/B 选反会让整份来源的说话人整体颠倒（关系状态、人格档案、
+    推演语料全跟着错），而界面上最容易发生的就是「顺手用了默认值」。
+    来源本来就有存档，所以这里**不需要重新上传**，改完直接重建（这正是留档的意义）。
+    不传 sender_a/sender_b 时按「对调」处理 —— 选反是最常见的错误形态。
+    """
+    _require_no_analyze("修正来源映射")
+    with _import_mutex:
+        ent = import_sources.get(source_id)
+        if ent is None:
+            raise HTTPException(404, "该来源不在登记表里")
+        smap = dict(ent.get("sender_map") or {})
+        if len(smap) != 2:
+            raise HTTPException(
+                400, f"这份来源的映射不是 2 个账号（当前 {len(smap)} 个），无法自动对调；"
+                     f"请把它移除后重新导入")
+        names = list(smap.keys())
+        a, b = (body.sender_a or "").strip(), (body.sender_b or "").strip()
+        if a or b:
+            if not a or not b or a == b:
+                raise HTTPException(400, "需要给出两个不同的账号名")
+            if {a, b} != set(names):
+                raise HTTPException(
+                    400, f"账号名必须是这份来源出现的两个账号：{'、'.join(names)}")
+            new_map = {a: "A", b: "B"}
+        else:
+            # 对调：**按当前值取反**，而不是固定赋值 a→B / b→A。
+            # 固定赋值会让「连点两次对调」静默失效（第二次等于重写同一个结果），
+            # 用户看到的是「点了没反应」——这正是测试抓到的那个 bug。
+            new_map = {n: ("A" if v == "B" else "B") for n, v in smap.items()}
+        import_sources.set_sender_map(source_id, new_map)
+        summary, missing = _rebuild_from_sources()
+        return {"ok": True, "source_id": source_id,
+                "sender_map": new_map,
+                "summary": summary, "missing_sources": missing,
+                "sources": import_sources.list_view()}
+
+
+@app.delete("/api/import/sources/{source_id}")
+def api_import_source_delete(source_id: str):
+    """移除一份已登记来源（同时删其存档），并从剩余来源重建一次库。"""
+    _require_no_analyze("移除来源")
+    with _import_mutex:
+        try:
+            res = import_sources.remove_source(source_id)
+        except KeyError:
+            raise HTTPException(404, "该来源不在登记表里")
+        summary, missing = _rebuild_from_sources()
+        return {"ok": True, "removed": res.get("removed"), "summary": summary,
+                "missing_sources": missing, "sources": import_sources.list_view()}
+
+
+# ================================================================ 媒体导入通道（v0.3）
+#
+# 表情包 / 图片与聊天记录是两条独立通道：消息里只有文件名，真正的图片文件往往在
+# 另一次导出里、或散落在用户自己收集的文件夹里。所以媒体必须能单独导入，
+# 再靠「文件名精确匹配」与消息关联（message_media 表；匹配不上就留空，不猜）。
+#
+# 存储：data/profiles/<id>/media/<sha256 前16位><ext>（按内容哈希去重）
+# ⚠️ 红线：媒体不做脱敏、不进 LLM —— 详见 docs/IMPORT.md「媒体导入」一节。
+def _media_stats_safe() -> dict:
+    try:
+        return media_store.stats()
+    except Exception as e:
+        return {"count": 0, "by_kind": {}, "total_bytes": 0, "error": str(e)[:120]}
+
+
+def _media_kind_param(v: str | None) -> str:
+    k = (v or "auto").strip().lower()
+    if k not in ("auto", "sticker", "image"):
+        raise HTTPException(400, "kind 需为 auto / sticker / image")
+    return k
+
+
+@app.get("/api/media")
+def api_media_library():
+    """媒体库清单（含与消息的关联数、体积统计）。
+
+    路径特意不用 `/api/media/library` —— 那会撞上 `/api/media/{name}`（同名单段路径
+    先注册先匹配），"library" 会被当成文件名去查图片。
+    """
+    try:
+        return {"items": media_store.list_media(), "stats": media_store.stats()}
+    except Exception as e:
+        raise HTTPException(500, f"读取媒体索引失败：{str(e)[:200]}")
+
+
+@app.post("/api/media/import")
+async def api_media_import(request: Request):
+    """媒体独立导入：multipart 多文件（或裸 octet-stream）+ ?kind=auto|sticker|image。"""
+    _require_no_analyze("导入媒体")
+    raw = await request.body()
+    kind = _media_kind_param(request.query_params.get("kind"))
+    with _import_mutex:
+        if len(raw) > MEDIA_REQUEST_MAX_BYTES:
+            raise HTTPException(413, "本次上传体积过大，请分批导入")
+        items = _extract_uploads(request, raw)
+        if len(items) > MEDIA_MAX_FILES:
+            raise HTTPException(400, f"单次最多 {MEDIA_MAX_FILES} 张")
+        tmp = _media_tmp_dir()
+        tmp.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        names: list[str] = []
+        try:
+            for data, filename in items:
+                name = safe_filename(filename)
+                if not data:
+                    continue
+                p = tmp / (uuid.uuid4().hex + (Path(name).suffix.lower() or ".bin"))
+                p.write_bytes(data)
+                paths.append(p)
+                names.append(name)
+            result = _media_import_pairing(paths, names, kind)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"媒体导入失败：{str(e)[:200]}")
+        finally:
+            for p in paths:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        return result
+
+
+class MediaDirBody(BaseModel):
+    path: str
+    kind: str = "auto"
+
+
+@app.post("/api/media/import_dir")
+def api_media_import_dir(body: MediaDirBody):
+    """导入本机一个目录里的全部图片（典型用法：WeFlow 导出的 Emojis 文件夹）。
+
+    只在本机 127.0.0.1 上提供；不移动原文件，只按内容哈希复制存档。
+    """
+    _require_no_analyze("导入媒体")
+    kind = _media_kind_param(body.kind)
+    d = Path((body.path or "").strip().strip('"').strip("'"))
+    if not d:
+        raise HTTPException(400, "请填写目录路径")
+    if not d.is_dir():
+        raise HTTPException(400, f"目录不存在或不可读：{d.name}")
+    with _import_mutex:
+        try:
+            paths = sorted(p for p in d.iterdir()
+                           if p.is_file() and p.suffix.lower() in media_store.ALLOWED_EXTS)
+        except OSError as e:
+            raise HTTPException(400, f"读取目录失败：{str(e)[:160]}")
+        if not paths:
+            raise HTTPException(400, "该目录下没有可导入的图片"
+                                     "（支持 " + " / ".join(sorted(media_store.ALLOWED_EXTS)) + "）")
+        if len(paths) > 5000:
+            raise HTTPException(400, f"目录里图片过多（{len(paths)} 张），请分批导入")
+        try:
+            return _media_import_pairing(paths, [p.name for p in paths], kind)
+        except Exception as e:
+            raise HTTPException(500, f"媒体导入失败：{str(e)[:200]}")
+
+
+def _media_import_pairing(paths: list[Path], names: list[str], kind: str) -> dict:
+    """逐张归档 + 索引，然后与消息做一次关联。"""
+    added, dedup, failed = [], [], []
+    for p, name in zip(paths, names):
+        r = media_store.import_file(p, kind=kind, original_name=name)
+        if not r.get("ok"):
+            failed.append({"name": r.get("filename") or p.name, "reason": r.get("reason")})
+        elif r.get("dedup"):
+            dedup.append(r["filename"])
+        else:
+            added.append(r["filename"])
+    link = {"linked": 0, "candidates": 0, "unmatched": 0}
+    try:
+        link = media_store.link_messages()
+    except Exception as e:
+        link["error"] = str(e)[:120]
+    return {"ok": True, "total": len(paths),
+            "added": added, "dedup": dedup, "failed": failed,
+            "added_count": len(added), "dedup_count": len(dedup),
+            "failed_count": len(failed), "media_link": link,
+            "stats": _media_stats_safe()}
+
+
+@app.delete("/api/media/item/{media_id}")
+def api_media_delete(media_id: str):
+    _require_no_analyze("删除媒体")
+    with _import_mutex:
+        try:
+            return {"ok": True, **media_store.delete(media_id),
+                    "stats": _media_stats_safe()}
+        except KeyError:
+            raise HTTPException(404, "该媒体不在索引里")
 
 
 # ================================================================ 分析任务（v0.3 R2）

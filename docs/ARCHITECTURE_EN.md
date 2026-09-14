@@ -79,6 +79,50 @@ advances a day every N messages (default 20) or on demand. Events settle daily
 (same-type events count once per day, decayed on the second, capped after) to
 prevent score farming.
 
+### 6. Import pipeline v2: the trade-offs behind multi-source merge
+
+Real life is rarely "one export, one file" — the same conversation may have been
+exported on WeChat once, on Telegram once, and later tidied into a txt. Four
+deliberate choices:
+
+1. **The DB is a rebuild of *all* registered sources**, not an append onto the
+   existing DB. Appending looks cheaper but drags in an idempotency swamp
+   (importing the same file twice doubles it; removing a source means reversing
+   statistics). Registering sources and rebuilding makes the semantics
+   *same sources + same options = deterministic result*: sources can be removed or
+   replaced individually. The price is source archiving (`import_sources.py` +
+   `sources/`) and re-parsing everything on each import; at chat-log scale that is
+   acceptable.
+2. **A/B is mapped per source**, not globally. Handles differ by app (WeChat wxid
+   / Telegram `from_id` / a nickname inside plain text), so one global pair would
+   fail on half of them — and unmapped messages become unknown senders that trip
+   gate G7.
+3. **The dedup key is timestamp + sender + content hash, and only generated for
+   messages with a deterministic identity**: text when there is text, attachment
+   name when there is one, `None` (no dedup) otherwise. Missing a duplicate is
+   better than deleting a real message — the same "never guess" rule this project
+   applies everywhere else.
+4. **Mapping self-check.** A swapped A/B silently disables dedup (different sender
+   means a different key, so the same sentence becomes two rows), which is the
+   hardest mistake to notice yourself. So after dedup the assembler rescans: if the
+   same "timestamp + content" still sits on both sides, the only plausible
+   explanation is a swapped source. That surfaces as `map_conflicts` in the preview
+   and in the gates.
+
+Supporting schema change (data spec v1 to v2): `messages` gains `source_id` and
+`dedup_key`; new tables `import_sources`, `media`, `message_media`. Existing v1
+databases are upgraded idempotently on first access by
+`phase1_ingest.ensure_v2_schema()` — no manual migration.
+
+**Why media is a separate channel**: a chat record only holds a filename, while
+the actual image often lives in another export or in a folder you collected
+yourself. Media is therefore imported on its own (`media_store.py`), archived and
+deduplicated by content hash, then linked to messages by **exact filename match**
+(no match means no link). That is why `/api/media/{name}` changed from
+"32-hex filenames only" to "look up the media index first, then fall back to the
+legacy `media.emojis_dir` convention". Note that media is **not sanitized** (raw
+binaries) and **never enters analysis or LLM calls**.
+
 ## Repository layout
 
 ```
@@ -87,7 +131,7 @@ if_we_elsewhere/
 ├── config.example.yaml     # config template (copy to config.yaml)
 ├── app/
 │   ├── config.py           # config loader (env > yaml > defaults)
-│   ├── phase1_ingest.py    # import / sanitize / sessionize / gates (library)
+│   ├── phase1_ingest.py    # import / sanitize / sessionize / gates (library) + v2 multi-source merge
 │   ├── phase2_llm.py       # robust structured-output LLM layer
 │   ├── phase4_retrieval.py # memory retrieval (bigram+IDF+vector, bi-temporal)
 │   ├── phase5_common.py    # sim clock / world state / branch memory fusion

@@ -448,8 +448,45 @@ async function createLine(start, name, rewrite) {
   } catch (e) { toast("创建失败：" + e.message); }
 }
 
-/* ---------------------------------------------------------------- 导入向导（v0.2 O-5f） */
-const IMP = { id: null, report: null, candidates: [], busy: false };
+/* ---------------------------------------------------------------- 导入向导（v0.3 · 多源合并） */
+const IMP = {
+  batch: null, files: [], excluded: [], sel: {}, merge: null, busy: false,
+};
+
+function kv(k, v) { return `<div class="k">${k}</div><div class="v">${v}</div>`; }
+
+/** 带超时的 api()：卡住的请求会自己中断，界面不会永远停在「处理中…」。
+ *  抛出的错误 name === "AbortError" 表示超时。 */
+async function apiTimeout(path, opts, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await api(path, { ...(opts || {}), signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+const isTimeout = e => !!(e && (e.name === "AbortError" || e.name === "TimeoutError"));
+const T_UPLOAD = 300000, T_PREVIEW = 180000, T_MERGE = 120000, T_COMMIT = 900000;
+
+/** 一份来源的 A/B 映射载荷。
+ *  ⚠ 字段名必须与服务端 ImportSourceSel 一致（sender_a / sender_b）。
+ *  这里曾经直接展开本地的 {a, b}，而服务端 pydantic 会**静默忽略未知字段**，
+ *  于是映射被读成空串，用户看到的是莫名其妙的「「xxx.json」还没选 A/B 双方账号」。
+ *  改这里之前先看 tests/test_importers.py::TestImportApiContract。 */
+function selPayload(importId) {
+  const s = IMP.sel[importId] || {};
+  return { import_id: importId, sender_a: s.a || "", sender_b: s.b || "" };
+}
+function fmtSize(n) {
+  if (!n && n !== 0) return "—";
+  return n > 1024 * 1024 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+}
+function fmtTs(sec) {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 function impStep(n) {
   for (let i = 1; i <= 3; i++) {
@@ -461,156 +498,361 @@ function impStep(n) {
 }
 
 function openImport() {
-  IMP.id = null; IMP.report = null; IMP.candidates = [];
+  IMP.batch = null; IMP.files = []; IMP.excluded = []; IMP.sel = {};
+  IMP.merge = null; IMP.busy = false;
+  $("#impMerge").innerHTML = "正在分析…";
+  $("#impSrcList").innerHTML = "";
+  $("#impFile").value = "";
   const nm = V3.curName();
-  $("#impTarget").innerHTML = `⚠ 导入会全量重建<b>当前好友「${esc(nm)}」</b>的数据库：` +
-    `他的推演线与分析产物会被清空（persona 文件保留）；<b>其他好友不受影响</b>。`;
+  $("#impTarget").innerHTML = `⚠ 导入会把<b>当前好友「${esc(nm)}」</b>的库按「全部已导入来源」重建一次：` +
+    `现有的推演线与分析产物会被清空；<b>人格档案与媒体库（表情包 / 图片）保留</b>；` +
+    `<b>其他好友不受影响</b>。`;
   $("#impModal").classList.add("open");
   impStep(1);
+  loadSources();
+  // 清掉可能残留的服务端批次锁（上次上传后直接关窗的情况），避免再传时 409
+  api("/api/import/cancel", { method: "POST" }).catch(() => { });
 }
 
-function closeImport() { $("#impModal").classList.remove("open"); }
+function closeImport() {
+  impCancel(true);                       // 关窗即放弃本批，别让服务端的导入锁悬着
+  $("#impModal").classList.remove("open");
+}
 
-function impResetToUpload() { IMP.id = null; impStep(1); }
-
-async function impUpload(file) {
-  if (IMP.busy) return;
-  IMP.busy = true;
-  $("#impDrop").querySelector("b").textContent = `上传中：${file.name} …`;
+async function impCancel(silent) {
+  if (!IMP.batch) return;
+  IMP.batch = null;
   try {
-    const r = await fetch("/api/import/upload?filename=" + encodeURIComponent(file.name),
-      { method: "POST", body: file });
-    if (!r.ok) {
-      let d = ""; try { d = (await r.json()).detail || ""; } catch (e) { }
-      throw new Error(d || ("HTTP " + r.status));
-    }
-    const d = await r.json();
-    IMP.id = d.import_id;
-    await impPreview();
+    await api("/api/import/cancel", { method: "POST" });
   } catch (e) {
-    toast("上传失败：" + e.message);
-    $("#impDrop").querySelector("b").textContent = "拖拽文件到这里，或点击选择";
-  } finally { IMP.busy = false; }
+    if (!silent) toast("释放导入会话失败：" + e.message);
+  }
+}
+
+async function impResetToUpload() {
+  IMP.files = []; IMP.excluded = []; IMP.sel = {}; IMP.merge = null;
+  await impCancel(true);
+  impStep(1);
+  $("#impFile").value = "";
+  loadSources();
+}
+
+async function impUpload(fileList, _retried) {
+  const files = Array.from(fileList || []);
+  if (!files.length || IMP.busy) return;
+  if (files.length > 12) return toast("单次最多 12 份文件，请分两批导入");
+  IMP.busy = true;
+  const tip = $("#impDrop").querySelector("b");
+  tip.textContent = `上传中：${files.length} 份 …`;
+  let d = null, err = "";
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), T_UPLOAD);
+  try {
+    const fd = new FormData();
+    files.forEach(f => fd.append("files", f, f.name));
+    const r = await fetch("/api/import/upload", { method: "POST", body: fd, signal: ctl.signal });
+    if (r.ok) {
+      d = await r.json();
+    } else {
+      let detail = "";
+      try { detail = (await r.json()).detail || ""; } catch (e) { }
+      err = detail || ("HTTP " + r.status);
+      // 服务端还挂着上一次没走完的批次（关向导 / 刷新页面留下的）→ 主动放掉，下面自动重试一次
+      if (!_retried && /导入任务进行中/.test(err)) {
+        try {
+          await api("/api/import/cancel", { method: "POST" });
+          err = "";
+        } catch (e2) { /* 放不掉就照实报错 */ }
+      }
+    }
+  } catch (e) {
+    err = isTimeout(e) ? "上传超时（文件可能过大，或服务未响应）" : e.message;
+  } finally {
+    clearTimeout(timer);
+  }
+  IMP.busy = false;
+  $("#impFile").value = "";
+  tip.textContent = "拖拽文件到这里，或点击选择（可多选）";
+  if (d) {
+    if (d.reclaimed) toast("已放弃上一次没走完的导入，按本次重新开始");
+    IMP.batch = d.batch_id;
+    IMP.files = (d.files || []).map(f => ({ ...f }));
+    IMP.excluded = []; IMP.sel = {};
+    await impPreview();
+    return;
+  }
+  if (err) return toast("上传失败：" + err);
+  return impUpload(files, true);        // 已放掉旧批次 → 原样重试一次（不会无限循环）
 }
 
 async function impPreview() {
-  if (!IMP.id) return;
+  if (!IMP.batch) return;
   IMP.busy = true;
   impStep(2);
-  $("#impReport").innerHTML = "分析中…";
+  $("#impMerge").innerHTML = "正在逐份体检并试合并…";
+  $("#impSrcList").innerHTML = "";
   try {
-    const d = await api("/api/import/preview", {
+    const d = await apiTimeout("/api/import/preview", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ import_id: IMP.id }),
+      body: JSON.stringify({ batch_id: IMP.batch }),
+    }, T_PREVIEW);
+    const items = d.items || [];
+    IMP.files.forEach(f => {
+      const it = items.find(x => x.import_id === f.import_id) || {};
+      f.report = it.report || null;
+      f.candidates = it.candidates || [];
+      const sug = (f.report && (f.report.mapping_default || f.report.suggested_args)) || {};
+      IMP.sel[f.import_id] = { a: sug.sender_a || "", b: sug.sender_b || "" };
     });
-    IMP.report = d.report;
-    IMP.candidates = d.candidates || [];
-    renderImpReport(d);
+    IMP.merge = d.merge || null;
+    renderImpMerge({ merge: d.merge, merge_error: d.merge_error });
+    renderImpSources();
   } catch (e) {
-    $("#impReport").innerHTML = `<h3 class="bad">预览失败</h3><div>${esc(e.message)}</div>`;
-    toast("预览失败：" + e.message);
+    const to = isTimeout(e);
+    if (to) await impCancel(true);          // 超时就把服务端的批次一起放掉，别留锁
+    $("#impMerge").innerHTML = `<div class="imp-tag warn">` +
+      `${to ? "预览超时 —— 已释放本次导入会话，请点「← 重新上传」重试"
+           : "预览失败：" + esc(e.message)}</div>`;
+    $("#impCommit").disabled = true;
+    toast(to ? "预览超时，已释放本次导入" : "预览失败：" + e.message);
   } finally { IMP.busy = false; }
 }
 
-function renderImpReport(d) {
-  const r = d.report;
-  const ok = !!r.importable;
-  let h = `<h3 class="${ok ? "ok" : "bad"}">${ok ? "✓ " : "✕ "}${esc(r.verdict || "无法识别格式")}</h3>`;
-  if (!r.recognized) {
-    h += `<div>这个文件我们认不出来。可能的原因：</div>
-          <ul>${(r.reasons || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
-          <div>可尝试的格式与来源见第一步的说明。</div>`;
-    $("#impReport").innerHTML = h;
+async function impRecompute() {
+  const sel = IMP.files
+    .filter(f => !IMP.excluded.includes(f.import_id))
+    .map(f => selPayload(f.import_id))
+    .filter(s => s.sender_a && s.sender_b && s.sender_a !== s.sender_b);
+  if (!sel.length) {
+    $("#impMerge").innerHTML = `<div class="imp-sub">先给每一份来源选好「你 / 对方」，这里会显示合并后的结果。</div>`;
     $("#impCommit").disabled = true;
-    $("#impPickRow").style.display = "none";
     return;
   }
-  const kv = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
-  h += `<div class="imp-kv">`;
-  h += kv("格式", esc(r.importer) + (r.source_encoding ? `（${esc(r.source_encoding)}）` : ""));
-  h += kv("消息数", `${r.message_count} 条有效 / 共 ${r.total_rows} 行`);
-  if (r.time_span) h += kv("时间跨度", `${esc(r.time_span.first)} → ${esc(r.time_span.last)}（${r.time_span.days} 天 / ${r.time_span.active_days} 个有消息日）`);
-  h += kv("消息类型", Object.entries(r.type_dist || {}).map(([k, v]) => esc(k) + "×" + v).join("，") || "—");
-  if (r.skipped && Object.keys(r.skipped).length)
-    h += kv("跳过", Object.entries(r.skipped).map(([k, v]) => esc(k.replace("skipped_", "")) + "×" + v).join("，"));
-  const pe = r.privacy_estimate;
-  if (pe) h += kv("脱敏预估", `${pe.messages_with_hits} 条命中隐私模式` +
-    (Object.keys(pe.by_category || {}).length
-      ? "（" + Object.entries(pe.by_category).map(([k, v]) => esc(k) + "×" + v).join("，") + "）" : ""));
-  h += `</div>`;
-  if (r.reasons && r.reasons.length)
-    h += `<div class="imp-tags">${r.reasons.map(x => `<span class="imp-tag warn">${esc(x)}</span>`).join("")}</div>`;
-
-  // A/B 候选 + 样例
-  if (IMP.candidates.length) {
-    $("#impSelA").innerHTML = IMP.candidates.map(c =>
-      `<option value="${esc(c.account)}">${esc(c.account)}（${c.count} 条，${c.pct}%）</option>`).join("");
-    $("#impSelB").innerHTML = $("#impSelA").innerHTML;
-    $("#impSelA").selectedIndex = 0;
-    $("#impSelB").selectedIndex = Math.min(1, IMP.candidates.length - 1);
-    h += IMP.candidates.slice(0, 4).map(c =>
-      `<div class="imp-cand"><b>${esc(c.account)}</b>　${c.count} 条（${c.pct}%）` +
-      (c.samples || []).map(s => `<div class="sample">${esc(s.text)}</div>`).join("") +
-      `</div>`).join("");
-    $("#impPickRow").style.display = IMP.candidates.length >= 2 ? "flex" : "none";
-    $("#impCommit").disabled = !(ok && IMP.candidates.length >= 2);
-    if (IMP.candidates.length < 2)
-      h += `<div class="imp-tag warn">候选账号不足 2 个——双人对话才可导入，请检查导出范围</div>`;
-  } else {
-    $("#impPickRow").style.display = "none";
-    $("#impCommit").disabled = true;
+  try {
+    const d = await apiTimeout("/api/import/merge", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch_id: IMP.batch, sources: sel, exclude: IMP.excluded }),
+    }, T_MERGE);
+    IMP.merge = d.merge;
+    renderImpMerge({ merge: d.merge });
+  } catch (e) {
+    $("#impMerge").innerHTML = `<div class="imp-tag warn">` +
+      `${isTimeout(e) ? "合并预览超时" : "合并预览失败：" + esc(e.message)}</div>`;
   }
-  $("#impReport").innerHTML = h;
+}
+
+function renderImpMerge(d) {
+  const m = d.merge;
+  let h = "";
+  if (d.merge_error) h += `<div class="imp-tag warn">合并预览失败：${esc(d.merge_error)}</div>`;
+  if (!m) {
+    h += `<div class="imp-sub">还没有可合并的来源：先给每一份选好 A/B 双方账号。</div>`;
+    $("#impMerge").innerHTML = h;
+    $("#impCommit").disabled = true;
+    return;
+  }
+  const dup = m.duplicates_removed || 0;
+  h += `<h3 class="ok">合并后 ${m.message_count} 条消息</h3>`;
+  h += `<div class="imp-kv">`;
+  h += kv("来源份数", `${m.source_count} 份（原始解析 ${m.parsed_total} 条）`);
+  h += kv("跨源去重", dup ? `移除 <b>${dup}</b> 条重复消息` : "没有重复");
+  if (m.session_span)
+    h += kv("合并时间轴", `${fmtTs(m.session_span.first_ts)} → ${fmtTs(m.session_span.last_ts)}` +
+      `（${m.session_span.days} 天）`);
+  if (m.overlap)
+    h += kv("来源重叠区", `${fmtTs(m.overlap.first_ts)} → ${fmtTs(m.overlap.last_ts)}` +
+      `（${m.overlap.days} 天，多份来源都覆盖这段）`);
+  if (m.unknown_sender)
+    h += kv("无法归属", `<span class="bad">${m.unknown_sender} 条消息的发送者不在 A/B 映射里</span>`);
+  h += `</div>`;
+  if (m.provisional)
+    h += `<div class="imp-tag warn">当前用的是体检建议的映射，改选 A/B 后会自动重算</div>`;
+  if (m.map_conflicts)
+    h += `<div class="imp-tag warn">⚠ 有 ${m.map_conflicts} 组消息「时间 + 内容」相同但发送者相反 —— ` +
+      `很可能某份来源的 A/B 选反了（选反会让去重失效、消息翻倍），请核对上方下拉框</div>`;
+  if (m.skipped && m.skipped.length)
+    h += `<div class="imp-tag warn">还没选 A/B、暂未计入合并：${m.skipped.map(esc).join("、")}</div>`;
+  $("#impMerge").innerHTML = h;
+  $("#impCommit").disabled = !m.message_count;
+}
+
+/* 当前选定的 A / B 各自的脱敏样例：让用户靠「这是不是我说话的样子」来确认方向。
+   A 选反会让整份来源的说话人颠倒，而这件事除了人眼没有可靠的自动判据。 */
+function abSamplesHtml(f) {
+  const cur = IMP.sel[f.import_id] || { a: "", b: "" };
+  const cands = f.candidates || [];
+  const pick = acc => ((cands.find(c => c.account === acc) || {}).samples) || [];
+  const col = (title, acc) =>
+    `<div class="imp-ab-col"><b>${title}</b><span class="imp-sub">${esc(acc || "（未选）")}</span>` +
+    (pick(acc).map(s => `<div class="sample">${esc(s.text)}</div>`).join("") ||
+     `<div class="sample">—</div>`) + `</div>`;
+  return col("你（A）", cur.a) + col("对方（B）", cur.b);
+}
+
+function refreshAB(importId) {
+  const box = $("#ab-" + importId);
+  const f = IMP.files.find(x => x.import_id === importId);
+  if (box && f) box.innerHTML = abSamplesHtml(f);
+}
+
+function renderImpSources() {
+  const shown = IMP.files.filter(f => !IMP.excluded.includes(f.import_id));
+  let h = `<h3>逐份确认<span class="imp-sub">每份来源的账号名不同，所以各自选一次「你 / 对方」</span></h3>`;
+  h += `<div class="imp-tag warn" style="margin-bottom:8px">A 必须是<b>你在每一份来源里</b>的账号名。` +
+    `选反会让这份来源的说话人整体颠倒（关系状态、人格档案、推演语料都会跟着错）。` +
+    `下拉框的默认值只是<b>按消息条数猜的</b>，请对着下方样例逐份核对。</div>`;
+  if (!shown.length) h += `<div class="imp-sub">本批文件都被移除了，点「← 重新上传」重新选。</div>`;
+  h += shown.map(f => {
+    const r = f.report || {};
+    const cands = f.candidates || [];
+    const bad = !r.recognized || !r.message_count;
+    const cur = IMP.sel[f.import_id] || { a: "", b: "" };
+    const opts = v => cands.map(c =>
+      `<option value="${esc(c.account)}"${c.account === v ? " selected" : ""}>` +
+      `${esc(c.account)}（${c.count} 条，${c.pct}%）</option>`).join("");
+    let inner = "";
+    if (bad) {
+      inner = `<div class="imp-tag warn">✕ 认不出这份文件：` +
+        `${esc((r.reasons || [])[0] || r.verdict || "格式未识别")}</div>` +
+        `<div class="imp-sub">把它移出本批，其余来源照常导入。</div>`;
+    } else {
+      inner = `<div class="imp-kv">
+        <div class="k">格式</div><div class="v">${esc(r.importer || "—")}` +
+        `${r.source_encoding ? `（${esc(r.source_encoding)}）` : ""}</div>
+        <div class="k">条数</div><div class="v">${r.message_count} 条有效 / 共 ${r.total_rows} 行</div>`;
+      if (r.time_span)
+        inner += `<div class="k">跨度</div><div class="v">${esc(r.time_span.first)} → ${esc(r.time_span.last)}</div>`;
+      if (r.skipped && Object.keys(r.skipped).length)
+        inner += `<div class="k">跳过</div><div class="v">` +
+          Object.entries(r.skipped).map(([k, v]) => esc(k.replace("skipped_", "")) + "×" + v).join("，") + `</div>`;
+      if (r.line_parse)
+        inner += `<div class="k">行解析</div><div class="v">${r.line_parse.parsed} 条` +
+          `（续行并入 ${r.line_parse.appended_lines} 行` +
+          `${r.line_parse.skipped_no_ts ? `，跳过 ${r.line_parse.skipped_no_ts} 行` : ""}）</div>`;
+      inner += `</div>`;
+      if (cands.length >= 2) {
+        inner += `<div class="form-row">
+          <label>你（A）</label><select data-a="${f.import_id}">${opts(cur.a)}</select>
+          <label>对方（B）</label><select data-b="${f.import_id}">${opts(cur.b)}</select>
+        </div>`;
+        const md = r.mapping_default || {};
+        inner += `<div class="imp-sub">默认值来源：` +
+          (md.source === "config" ? "config.yaml 里你登记过的账号名"
+            : md.source === "guess" ? "<b>按消息条数猜的</b> —— 请确认 A 是你" : "—") + `</div>`;
+        inner += `<div class="imp-ab" id="ab-${f.import_id}">${abSamplesHtml(f)}</div>`;
+      } else {
+        inner += `<div class="imp-tag warn">候选账号不足 2 个——双人对话才可导入，请检查导出范围</div>`;
+      }
+      if (r.reasons && r.reasons.length)
+        inner += `<div class="imp-tags">` + r.reasons.slice(0, 3).map(x =>
+          `<span class="imp-tag warn">${esc(x)}</span>`).join("") + `</div>`;
+      inner += `<div class="imp-tags">` + cands.slice(0, 5).map(c =>
+        `<span class="imp-tag">${esc(c.account)}　${c.count} 条（${c.pct}%）</span>`).join("") + `</div>`;
+    }
+    return `<div class="imp-card2${bad ? " bad" : ""}">
+      <div class="imp-card2-head">
+        <b>${esc(f.filename)}</b><span class="imp-sub">${fmtSize(f.size)}</span>
+        <div class="spacer"></div>
+        <button class="btn btn-sm" data-rm="${f.import_id}">移除本份</button>
+      </div>${inner}</div>`;
+  }).join("");
+  if (IMP.excluded.length)
+    h += `<div class="imp-sub">已移除 ${IMP.excluded.length} 份，不会导入。</div>`;
+  $("#impSrcList").innerHTML = h;
+
+  $$("#impSrcList select[data-a]").forEach(el => el.onchange = () => {
+    const id = el.dataset.a;
+    (IMP.sel[id] = IMP.sel[id] || {}).a = el.value;
+    if (IMP.sel[id].a === IMP.sel[id].b) toast("「你」和「对方」不能是同一个账号");
+    refreshAB(id);
+    impRecompute();
+  });
+  $$("#impSrcList select[data-b]").forEach(el => el.onchange = () => {
+    const id = el.dataset.b;
+    (IMP.sel[id] = IMP.sel[id] || {}).b = el.value;
+    if (IMP.sel[id].a === IMP.sel[id].b) toast("「你」和「对方」不能是同一个账号");
+    refreshAB(id);
+    impRecompute();
+  });
+  $$("#impSrcList button[data-rm]").forEach(el => el.onclick = () => {
+    const id = el.dataset.rm;
+    IMP.excluded.push(id);
+    renderImpSources();
+    impRecompute();
+  });
 }
 
 async function impCommit() {
-  if (IMP.busy || !IMP.id) return;
-  const a = $("#impSelA").value, b = $("#impSelB").value;
-  if (!a || !b || a === b) return toast("请选择两个不同的账号分别作为你（A）与对方（B）");
+  if (IMP.busy || !IMP.batch) return;
+  const chosen = IMP.files.filter(f => !IMP.excluded.includes(f.import_id));
+  const sources = chosen.map(f => selPayload(f.import_id));
+  const badIdx = sources.findIndex(s => !s.sender_a || !s.sender_b);
+  if (badIdx >= 0) return toast(`「${chosen[badIdx].filename}」还没选「你 / 对方」`);
+  if (sources.some(s => s.sender_a === s.sender_b)) return toast("「你」和「对方」不能是同一个账号");
   const gap = parseInt($("#impGap").value, 10);
   IMP.busy = true;
   $("#impCommit").disabled = true;
   impStep(3);
-  $("#impResult").innerHTML = "导入中…（脱敏 → 会话化 → 入库 → 质量门禁）";
+  $("#impResult").innerHTML = "导入中…（逐份归档 → 从全部已导入来源重建 → 脱敏 → 会话化 → 门禁）";
   try {
-    const d = await api("/api/import/commit", {
+    const d = await apiTimeout("/api/import/commit", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ import_id: IMP.id, sender_a: a, sender_b: b,
-        session_gap_minutes: isNaN(gap) ? null : gap }),
-    });
-    renderImpResult(d.summary);
+      body: JSON.stringify({
+        batch_id: IMP.batch, sources, exclude: IMP.excluded,
+        session_gap_minutes: isNaN(gap) ? null : gap,
+      }),
+    }, T_COMMIT);
+    renderImpResult(d.summary, d.media_link, d.config_note);
     toast("导入完成");
   } catch (e) {
+    const to = isTimeout(e);
     $("#impResult").innerHTML =
-      `<h3 class="bad">✕ 导入失败</h3><div>${esc(e.message)}</div>` +
-      `<div style="margin-top:8px">临时文件已清理，可点击「再导一份」重新开始。</div>`;
+      `<h3 class="bad">✕ ${to ? "导入超时" : "导入失败"}</h3>` +
+      `<div>${esc(to ? "等待超过 15 分钟。导入可能仍在后台继续，可先刷新页面查看结果；"
+                     : e.message)}</div>` +
+      `<div style="margin-top:8px">临时文件已清理；已归档的来源仍保留，可点「再导一份」重试。</div>`;
   } finally {
     IMP.busy = false;
     $("#impCommit").disabled = false;
   }
 }
 
-function renderImpResult(s) {
+function renderImpResult(s, link, configNote) {
   const ok = !!s.gates_all_pass;
   const gates = s.gates || {};
-  const gname = { G2_时间序列有序: "时间序列有序", G3_双人占比: "双人占比",
-    G4_长断档告警: "长断档告警（不阻塞）", G5_脱敏残留: "脱敏残留", "G7_未知发送者/类型": "未知发送者/类型" };
-  $("#impResult").innerHTML =
-    `<h3 class="${ok ? "ok" : "bad"}">${ok ? "✓ 导入完成，全部门禁通过" : "导入完成，但存在未通过的门禁"}</h3>
+  const gname = {
+    G2_时间序列有序: "时间序列有序", G3_双人占比: "双人占比",
+    G4_长断档告警: "长断档告警（不阻塞）", G5_脱敏残留: "脱敏残留",
+    "G7_未知发送者/类型": "未知发送者/类型", G8_跨源重复: "跨源重复（不阻塞）",
+  };
+  let h = `<h3 class="${ok ? "ok" : "bad"}">` +
+    `${ok ? "✓ 导入完成，全部门禁通过" : "导入完成，但存在未通过的门禁"}</h3>
      <div class="imp-kv">
        <div class="k">消息数</div><div class="v">${s.message_count} 条 / ${s.session_count} 个会话</div>
+       <div class="k">来源</div><div class="v">${s.source_count} 份（库内共登记 ${s.registered_sources ?? s.source_count} 份）</div>
        <div class="k">时间跨度</div><div class="v">${esc(s.first_day)} → ${esc(s.last_day)}（${s.active_days} 个有消息日）</div>
+       ${s.duplicates_removed ? `<div class="k">跨源去重</div><div class="v">移除 ${s.duplicates_removed} 条重复消息</div>` : ""}
        <div class="k">内容字数</div><div class="v">${s.char_count_total}</div>
+       ${link && link.linked ? `<div class="k">媒体关联</div><div class="v">${link.linked} 条消息匹配到图片</div>` : ""}
      </div>
      <div class="imp-gates">` +
     Object.entries(gates).map(([k, v]) =>
       `<div class="imp-gate${v ? "" : " bad"}"><span class="${v ? "g-ok" : "g-bad"}">${v ? "✓" : "✕"}</span>${esc(gname[k] || k)}</div>`).join("") +
-    `</div>
-     <div class="imp-next">
+    `</div>`;
+  if (s.sources && s.sources.length)
+    h += `<div class="imp-cand"><b>本次参与合并的来源</b>` +
+      s.sources.map(x => `<div class="sample">${esc(x.name)}（${esc(x.importer)}，${x.message_count} 条）</div>`).join("") +
+      `</div>`;
+  if (s.missing_sources && s.missing_sources.length)
+    h += `<div class="imp-tag warn">这些已登记来源的存档找不到了，本次未参与：` +
+      `${s.missing_sources.map(esc).join("、")}</div>`;
+  if (configNote) h += `<div class="imp-tag warn">${esc(configNote)}</div>`;
+  h += `<div class="imp-next">
        <span>下一步：在本机跑一遍分析（事件 / 记忆 / 关系状态 / 转折点 / 人格档案）</span>
        <label class="chk"><input type="checkbox" id="impSkipLLM"><span>离线分析</span></label>
        <button class="btn btn-primary btn-sm" id="impAnalyze">立即分析</button>
      </div>`;
+  $("#impResult").innerHTML = h;
   const ia = $("#impAnalyze");
   if (ia) ia.onclick = () => {
     const skip = $("#impSkipLLM") ? $("#impSkipLLM").checked : false;
@@ -619,7 +861,181 @@ function renderImpResult(s) {
   };
 }
 
-/* 向导事件绑定 */
+/* ---------------------------------------------------------------- 已导入来源管理 */
+async function loadSources() {
+  const box = $("#impSrcBox");
+  if (!box) return;
+  box.innerHTML = `<div class="imp-sub">读取已导入来源…</div>`;
+  try {
+    const d = await api("/api/import/sources");
+    const src = d.sources || [];
+    window.__sources = src;
+    let h = `<b>已导入的来源（${src.length}）</b>`;
+    if (!src.length) {
+      h += `<div class="imp-sub">还没有导入过任何来源。同一段对话在不同应用里的记录，` +
+        `可以分多次导入——每次都会与已有来源重新合并。</div>`;
+    } else {
+      h += `<div class="imp-sub">库就是这些来源合并出来的结果。移除一份会立刻按剩余来源重建一次库；` +
+        `「你 / 对方」选反了就点「对调 A/B」——来源有存档，不用重新上传。</div>`;
+      h += src.map(s => {
+        const map = Object.entries(s.sender_map || {})
+          .map(([k, v]) => `${k}→${v}`).join("，") || "—";
+        const span = s.first_ts
+          ? fmtTs(s.first_ts).slice(0, 10) + " → " + fmtTs(s.last_ts).slice(0, 10) : "—";
+        return `<div class="src-row">
+        <div class="src-main">
+          <b>${esc(s.name)}</b>
+          <span class="imp-sub">${esc(s.importer || "—")} · ${s.message_count} 条 · ${span} · ${fmtSize(s.size)}</span>
+          <span class="imp-sub">账号映射：${esc(map)}</span>
+        </div>
+        <button class="btn btn-sm" data-swap="${esc(s.source_id)}">对调 A/B</button>
+        <button class="btn btn-sm" data-del="${esc(s.source_id)}">移除</button>
+      </div>`;
+      }).join("");
+    }
+    const md = d.media || {};
+    h += `<div class="imp-sub" style="margin-top:10px">媒体库：${md.count || 0} 个文件</div>`;
+    box.innerHTML = h;
+    $$("#impSrcBox button[data-swap]").forEach(el => el.onclick = async () => {
+      const id = el.dataset.swap;
+      const it = (window.__sources || []).find(x => x.source_id === id) || {};
+      const map = Object.entries(it.sender_map || {}).map(([k, v]) => `${k}→${v}`).join("，");
+      if (!confirm(`对调「${it.name || id}」的你/对方？\n\n当前：${map}\n对调后：A 与 B 互换\n\n` +
+        `会立刻按全部来源重建一次库（分析产物会失效，需要重新分析；人格档案与媒体库保留）。`)) return;
+      el.disabled = true;
+      try {
+        const d = await api("/api/import/sources/" + encodeURIComponent(id) + "/mapping",
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const s = d.summary || {};
+        toast(`已对调，重建后 ${s.message_count} 条`);
+        await loadSources();
+      } catch (e) {
+        toast("对调失败：" + e.message);
+        el.disabled = false;
+      }
+    });
+    $$("#impSrcBox button[data-del]").forEach(el => el.onclick = async () => {
+      const id = el.dataset.del;
+      const it = (window.__sources || []).find(x => x.source_id === id) || {};
+      if (!confirm(`移除来源「${it.name || id}」？\n\n会把它的存档删掉，并按剩余来源重建一次库（分析产物会失效，需要重新分析）。`)) return;
+      el.disabled = true;
+      try {
+        await api("/api/import/sources/" + encodeURIComponent(id), { method: "DELETE" });
+        toast("已移除并重建");
+        await loadSources();
+      } catch (e) {
+        toast("移除失败：" + e.message);
+        el.disabled = false;
+      }
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="imp-tag warn">读取已导入来源失败：${esc(e.message)}</div>`;
+  }
+}
+
+/* ---------------------------------------------------------------- 媒体库（表情包 / 图片） */
+const MED = { busy: false };
+
+function openMedia() {
+  $("#medDrop").querySelector("b").textContent = "拖拽图片到这里，或点击选择（可多选）";
+  $("#medMsg").textContent = "";
+  $("#medModal").classList.add("open");
+  loadMedia();
+}
+function closeMedia() { $("#medModal").classList.remove("open"); }
+
+async function loadMedia() {
+  const box = $("#medList");
+  box.innerHTML = `<div class="imp-sub">读取媒体库…</div>`;
+  try {
+    const d = await apiTimeout("/api/media", null, 30000);
+    const st = d.stats || {};
+    $("#medStats").innerHTML = `已导入 <b>${st.count || 0}</b> 个文件` +
+      (st.by_kind ? "（" + Object.entries(st.by_kind).map(([k, v]) =>
+        (k === "sticker" ? "表情包" : "图片") + " " + v).join("，") + "）" : "") +
+      `，占用 ${fmtSize(st.total_bytes || 0)}`;
+    const items = d.items || [];
+    if (!items.length) {
+      box.innerHTML = `<div class="imp-sub">媒体库是空的。导入表情包 / 图片后，` +
+        `对话里对方真实用过的表情就会显示成真图，而不是占位符。</div>`;
+      return;
+    }
+    box.innerHTML = items.map(m => `<div class="med-row">
+      <img class="med-thumb" src="/api/media/${encodeURIComponent(m.filename)}" alt="" loading="lazy">
+      <div class="med-main">
+        <b>${esc(m.filename)}</b>
+        <span class="imp-sub">${m.kind === "sticker" ? "表情包" : "图片"} · ${fmtSize(m.size)}` +
+      `${m.width ? ` · ${m.width}×${m.height}` : ""} · ` +
+      `${m.linked_messages ? `已关联 ${m.linked_messages} 条消息` : "暂未关联到消息"}</span>
+      </div>
+      <button class="btn btn-sm" data-mdel="${esc(m.media_id)}">删除</button>
+    </div>`).join("");
+    $$("#medList button[data-mdel]").forEach(el => el.onclick = async () => {
+      if (!confirm("从媒体库删除这个文件？（不影响聊天记录）")) return;
+      el.disabled = true;
+      try {
+        await api("/api/media/item/" + encodeURIComponent(el.dataset.mdel), { method: "DELETE" });
+        await loadMedia();
+      } catch (e) { toast("删除失败：" + e.message); el.disabled = false; }
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="imp-tag warn">读取媒体库失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function medUpload(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length || MED.busy) return;
+  MED.busy = true;
+  const kind = $("#medKind").value;
+  $("#medMsg").textContent = `上传中：${files.length} 张 …`;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), T_UPLOAD);
+  try {
+    const fd = new FormData();
+    files.forEach(f => fd.append("files", f, f.name));
+    const r = await fetch("/api/media/import?kind=" + encodeURIComponent(kind),
+      { method: "POST", body: fd, signal: ctl.signal });
+    if (!r.ok) {
+      let d = ""; try { d = (await r.json()).detail || ""; } catch (e) { }
+      throw new Error(d || ("HTTP " + r.status));
+    }
+    const d = await r.json();
+    $("#medMsg").textContent = `新增 ${d.added_count} 个，重复跳过 ${d.dedup_count} 个，` +
+      `失败 ${d.failed_count} 个` + (d.media_link ? `；本次关联到 ${d.media_link.linked} 条消息` : "");
+    if (d.failed && d.failed.length) toast("部分失败：" + d.failed[0].reason);
+    await loadMedia();
+  } catch (e) {
+    toast(isTimeout(e) ? "导入超时（图片较多或过大）" : "导入失败：" + e.message);
+    $("#medMsg").textContent = "";
+  } finally {
+    clearTimeout(timer);
+    MED.busy = false;
+    $("#medFile").value = "";
+  }
+}
+
+async function medImportDir() {
+  const path = $("#medDir").value.trim();
+  if (!path) return toast("先填写一个目录路径");
+  if (MED.busy) return;
+  MED.busy = true;
+  $("#medMsg").textContent = "正在导入目录…";
+  try {
+    const d = await apiTimeout("/api/media/import_dir", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, kind: $("#medKind").value }),
+    }, T_UPLOAD);
+    $("#medMsg").textContent = `新增 ${d.added_count} 个，重复跳过 ${d.dedup_count} 个，` +
+      `失败 ${d.failed_count} 个` + (d.media_link ? `；本次关联到 ${d.media_link.linked} 条消息` : "");
+    await loadMedia();
+  } catch (e) {
+    toast(isTimeout(e) ? "导入超时（目录里图片较多）" : "导入失败：" + e.message);
+    $("#medMsg").textContent = "";
+  } finally { MED.busy = false; }
+}
+
+/* 向导与媒体库的事件绑定 */
 $("#btnImport").onclick = openImport;
 $("#impClose").onclick = closeImport;
 $("#impModal").onclick = e => { if (e.target.id === "impModal") closeImport(); };
@@ -628,16 +1044,32 @@ $("#impAgain").onclick = impResetToUpload;
 $("#impDone").onclick = closeImport;
 $("#impCommit").onclick = impCommit;
 $("#impDrop").onclick = () => $("#impFile").click();
-$("#impFile").onchange = e => { const f = e.target.files[0]; if (f) impUpload(f); e.target.value = ""; };
+$("#impFile").onchange = e => { impUpload(e.target.files); e.target.value = ""; };
 $("#impDrop").ondragover = e => { e.preventDefault(); $("#impDrop").classList.add("over"); };
 $("#impDrop").ondragleave = () => $("#impDrop").classList.remove("over");
 $("#impDrop").ondrop = e => {
   e.preventDefault();
   $("#impDrop").classList.remove("over");
-  const f = e.dataTransfer.files[0];
-  if (f) impUpload(f);
+  impUpload(e.dataTransfer.files);
 };
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeImport(); });
+
+$("#btnMediaOpen").onclick = openMedia;
+$("#medClose").onclick = closeMedia;
+$("#medModal").onclick = e => { if (e.target.id === "medModal") closeMedia(); };
+$("#medDrop").onclick = () => $("#medFile").click();
+$("#medFile").onchange = e => { medUpload(e.target.files); e.target.value = ""; };
+$("#medDrop").ondragover = e => { e.preventDefault(); $("#medDrop").classList.add("over"); };
+$("#medDrop").ondragleave = () => $("#medDrop").classList.remove("over");
+$("#medDrop").ondrop = e => {
+  e.preventDefault();
+  $("#medDrop").classList.remove("over");
+  medUpload(e.dataTransfer.files);
+};
+$("#medDirBtn").onclick = medImportDir;
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { closeImport(); closeMedia(); }
+});
 
 /* ---------------------------------------------------------------- 事件绑定 */
 $("#btnNew").onclick = openModal;

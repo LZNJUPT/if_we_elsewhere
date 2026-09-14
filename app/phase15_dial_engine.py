@@ -355,13 +355,27 @@ class DialEngine:
         return {"event_type": et, "times": n, "counted": True, "note": note}
 
     # ---------------- 真实表情包 ----------------
+    def _available_media(self) -> set[str]:
+        """媒体库里的文件名集合（v0.3 媒体导入通道；缺表/缺列时不报错，返回空集）。"""
+        try:
+            rows = self.conn.execute("SELECT filename FROM media").fetchall()
+        except Exception:
+            return set()
+        return {(r[0] or "") for r in rows if r[0]}
+
     def pick_partner_sticker(self) -> Optional[str]:
-        """从【对方真实用过的】表情包里按使用频率加权抽一张（真图，非生成）。"""
+        """从【对方真实用过的】表情包里按使用频率加权抽一张（真图，非生成）。
+
+        v0.3 起候选判定放宽：命中媒体库文件名即可（自己导入的表情包文件名不限格式），
+        同时保留旧的 32 位 hex 命名以便兼容未走媒体导入的老用户。
+        """
         rows = self.conn.execute(
             "SELECT attachment_name, COUNT(*) AS c FROM messages "
             "WHERE subtype='emoji_gif' AND sender_key=? AND attachment_name IS NOT NULL "
             "GROUP BY attachment_name", (PARTNER,)).fetchall()
-        cand = [(a, c) for a, c in rows if STICKER_NAME.match(a or "")]
+        known = self._available_media()
+        cand = [(a, c) for a, c in rows
+                if (a in known) or STICKER_NAME.match(a or "")]
         if not cand:
             return None
         total = sum(c for _, c in cand)

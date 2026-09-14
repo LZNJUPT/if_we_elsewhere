@@ -69,10 +69,12 @@ python run.py demo
 data/profiles.json            # 注册表
 data/profiles/<id>/ifwe_v1.db # 该好友的库（含分析产物与对话线）
 data/profiles/<id>/persona/   # 该好友的人格档案
-data/profiles/<id>/profile.yaml   # 可选：只覆盖这个好友的配置（如表情包目录）
+data/profiles/<id>/sources/   # 已导入来源的存档 + sources.json 登记表（库由它们重建）
+data/profiles/<id>/media/     # 媒体库：表情包与图片（不做脱敏、不进 LLM）
+data/profiles/<id>/profile.yaml   # 可选：只覆盖这个好友的配置
 ```
 
-切换好友会一起切换「库 + 人格档案 + 对话线 + 表情包目录」，互不可见。
+切换好友会一起切换「库 + 人格档案 + 媒体库 + 来源存档 + 对话线」，互不可见。
 分析中或导入中不能切换 / 删除好友（会提示原因）。
 
 > 老用户升级：首次启动会把现有 `data/` 内容自动迁到 `data/profiles/default/`，
@@ -123,6 +125,36 @@ python run.py analyze       # 生成事件/记忆/关系状态/转折点/人格�
 config.yaml**。之后数据更新了，只需再跑一次 `python run.py init --source 新文件.jsonl`
 （账号映射复用配置，不必每次都带 `--sender-a/--sender-b`），或直接
 `python scripts/import_chat.py`（完全按 config.yaml 的 source/match 导入）。
+
+### 4.1 同一段对话散在多个应用里？
+
+可以分多次导入，系统会**按时间戳自动合并、跨源重复自动去重**（库始终由
+「全部已导入来源」重建，所以后一次导入不会丢掉前一次的数据）：
+
+```bash
+# 一次给两份不同应用的导出；--source/--sender-a/--sender-b 都可重复
+python scripts/import_chat.py \
+    --source 微信.csv    --sender-a wxid_me  --sender-b wxid_ta \
+    --source telegram.json --sender-a user_me --sender-b user_ta
+
+# 之后补一份整理好的 txt —— 会自动与上面两份合并
+python scripts/import_chat.py --source 整理.txt --sender-a 张三 --sender-b 李四
+```
+
+界面里更省事：左侧「导入记录」→ 拖入多份文件 → **逐份**选「你 / 对方」，
+下方实时显示合并后条数、去重条数、时间轴与来源重叠区。已导入的来源可以在
+同一页查看/单独移除。
+
+支持的格式：WeFlow JSONL、WeChatMsg CSV、Telegram JSON、纯文本 `.txt/.md/.log`、
+Word `.docx`（PDF 不解析，体检会提示转存）。
+
+### 4.2 表情包 / 图片
+
+表情包与图片走**独立通道**：「导入记录 → 打开媒体库」→ 拖入图片，或直接填一个
+本机目录路径批量导入。导入后按文件名与消息自动关联，对话里就会显示对方真实用过的图。
+
+> ⚠️ 媒体**不做脱敏**（图片是原始二进制），但也**不参与分析、不会被发给 LLM**。
+> 导入前请自行确认图片不含你不想留在本机的敏感信息。
 
 格式说明见 [IMPORT.md](IMPORT.md)。
 

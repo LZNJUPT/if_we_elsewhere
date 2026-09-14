@@ -5,10 +5,13 @@
 people:
   A: { key: "A", display: "你", name: "", match: "" }    # 用户本人；display 用于界面与提示词；match = 导出文件里的原始账号名
   B: { key: "B", display: "TA", name: "", match: "" }   # 数字人格一侧；match 留空时用 import_chat.py 的 CLI 参数指定
+  # match 也可以写成列表，一次覆盖多个来源的账号名（不同应用导出的账号名不一样）：
+  #   A: { match: ["wxid_me", "user_me", "张三"] }
+  #   B: { match: ["wxid_ta", "user_ta", "李四"] }
 
 chat:
   source: "data/raw/chat.jsonl"   # 你自己导出的聊天记录（chatlab/WeFlow JSONL）
-  format: "chatlab"               # v1 仅支持 chatlab(WeFlow)；wechatmsg 在路线图
+  format: "chatlab"               # 自动探测失败时的回退格式；可选 chatlab/wecomsg/telegram/plaintext/docx
   timezone: "Asia/Shanghai"
   session_gap_minutes: 30         # 相邻消息超过该间隔视为两个会话
 
@@ -20,7 +23,11 @@ llm:
   max_tokens: 8192
 
 media:
-  emojis_dir: ""                  # 表情包目录（WeFlow 导出的 Emojis 文件夹路径）；留空则界面显示占位符
+  # 旧版约定：指一个 32 位 hex 命名的表情包目录（如 WeFlow 导出的 Emojis 文件夹）。
+  # v0.3 起请优先用界面「导入记录 → 打开媒体库」导入（拖拽，或直接填目录路径批量导入）——
+  # 媒体库里任意文件名都能用，且按内容哈希去重、与消息按文件名自动关联。
+  # 本字段保留兼容，不再需要手动配置；留空即可。
+  emojis_dir: ""
 
 privacy:
   sanitize: "medium"              # 导入脱敏档位（v1 固定 medium）

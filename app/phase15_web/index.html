@@ -125,40 +125,50 @@
     </div>
     <div class="imp-steps">
       <span id="impS1" class="on">① 上传</span>
-      <span id="impS2">② 预览确认</span>
+      <span id="impS2">② 逐份确认 + 合并预览</span>
       <span id="impS3">③ 导入结果</span>
     </div>
 
     <div class="pane active imp-pane" id="imp-pane1">
       <div class="imp-drop" id="impDrop">
-        <b>拖拽文件到这里，或点击选择</b>
-        <span>支持 .jsonl / .json / .csv，≤ 50MB</span>
+        <b>拖拽文件到这里，或点击选择（可多选）</b>
+        <span>支持 .jsonl / .json / .csv / .txt / .md / .log / .docx，单份 ≤ 50MB，单批 ≤ 12 份</span>
+        <span class="imp-sub">不同应用分别导出的记录可以一起选：导入后会按时间戳自动合并、重复消息自动去重</span>
         <span class="imp-sub">全程本机处理，文件不会被上传到任何远端</span>
       </div>
-      <input type="file" id="impFile" accept=".jsonl,.json,.csv" hidden>
+      <input type="file" id="impFile" accept=".jsonl,.json,.csv,.txt,.md,.log,.docx,.pdf" multiple hidden>
       <div class="imp-formats">
-        <b>支持从这些工具的导出文件导入：</b>
+        <b>支持这些来源：</b>
         <ul>
           <li>chatlab / WeFlow 导出的 JSONL</li>
           <li>WeChatMsg（MemoTrace / 留痕）导出的 CSV</li>
-          <li>Telegram Desktop 导出的 result.json（Machine-readable JSON）</li>
+          <li>Telegram Desktop 导出的 result.json</li>
+          <li>整理好的 .txt / .md（每行一条：<code>2024-09-11 09:30:00 张三: 内容</code>）</li>
+          <li>Word .docx（段落或「时间｜发送者｜内容」表格）</li>
         </ul>
-        <span>只支持「你自己合法导出」的文件；本项目不解析任何聊天软件的数据库。</span>
+        <span>PDF 不解析：体检会识别出来并提示你转存为 txt 或 docx。只支持「你自己合法导出」的文件。</span>
+      </div>
+      <div class="imp-srcbox" id="impSrcBox"></div>
+      <div class="imp-formats imp-mediabox">
+        <b>表情包 / 图片是另一条通道</b>
+        <div class="imp-sub">表情包和图片文件往往单独导出、甚至是你自己收集的，与聊天记录分开导入，
+          导入后按文件名与消息自动关联。</div>
+        <div class="form-row">
+          <button class="btn btn-sm" id="btnMediaOpen">打开媒体库</button>
+        </div>
       </div>
     </div>
 
     <div class="pane imp-pane" id="imp-pane2">
-      <div class="imp-body" id="impReport">分析中…</div>
+      <div class="imp-merge" id="impMerge">正在分析…</div>
+      <div class="imp-srclist" id="impSrcList"></div>
       <div class="form imp-form">
-        <div class="form-row" id="impPickRow">
-          <label>你（A）</label><select id="impSelA"></select>
-          <label>对方（B）</label><select id="impSelB"></select>
-        </div>
         <div class="form-row">
           <label>会话切分阈值</label>
-          <input id="impGap" type="number" min="1" max="1440" value="30" style="width:80px"> <span class="imp-sub">分钟</span>
+          <input id="impGap" type="number" min="1" max="1440" value="30" style="width:80px">
+          <span class="imp-sub">分钟（相邻消息间隔超过它就算两个会话）</span>
         </div>
-        <div class="snap" id="impTarget">⚠ 导入会全量重建数据库：现有的推演线与分析产物会被清空（persona 文件保留）。</div>
+        <div class="snap" id="impTarget">⚠ 导入会把当前好友的库按「全部已导入来源」重建一次：现有的推演线与分析产物会被清空；人格档案与媒体库保留。</div>
         <div class="form-row">
           <button class="btn" id="impBack">← 重新上传</button>
           <div class="spacer"></div>
@@ -176,6 +186,44 @@
           <button class="btn btn-primary" id="impDone">完成</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="medModal">
+  <div class="modal-card imp-card">
+    <div class="modal-head">
+      <h2>媒体库（表情包 / 图片）</h2>
+      <button class="btn btn-sm" id="medClose">关闭</button>
+    </div>
+    <div class="imp-body med-body">
+      <div class="snap">表情包与图片<b>不做脱敏、也不参与任何 LLM 分析</b>，
+        只是原样存在本机、用于在对话里显示对方真实用过的图。图片请自行确认不含敏感信息。</div>
+
+      <div class="imp-drop" id="medDrop">
+        <b>拖拽图片到这里，或点击选择（可多选）</b>
+        <span>支持 .gif / .png / .jpg / .jpeg / .webp / .bmp，单张 ≤ 20MB</span>
+      </div>
+      <input type="file" id="medFile"
+             accept=".gif,.png,.jpg,.jpeg,.webp,.bmp,.jfif" multiple hidden>
+
+      <div class="form-row">
+        <label>类型</label>
+        <select id="medKind">
+          <option value="auto">自动（gif/webp 算表情包，其余算图片）</option>
+          <option value="sticker">表情包</option>
+          <option value="image">图片</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>或导入本机目录</label>
+        <input id="medDir" type="text" placeholder="例如 WeFlow 导出的 Emojis 文件夹路径">
+        <button class="btn btn-sm" id="medDirBtn">导入该目录</button>
+      </div>
+      <div class="imp-sub" id="medMsg"></div>
+
+      <div class="med-stats" id="medStats"></div>
+      <div class="med-list" id="medList"></div>
     </div>
   </div>
 </div>

@@ -80,16 +80,29 @@ def lock_path() -> Path:
     return base / LOCK_NAME
 
 
+def _run_text(cmd: list[str]) -> str:
+    """执行外部命令并**宽容解码**输出。
+
+    tasklist 的输出是 Windows 本地代码页（中文机器是 GBK），而 `subprocess.run(text=True)`
+    会按 locale/PYTHONUTF8 解码 —— 在 UTF-8 模式下遇到 GBK 字节会抛 UnicodeDecodeError，
+    异常发生在读取线程里、主调用只拿到空 stdout，于是「进程是否存活」永远判为否，
+    单实例检测失效（重复双击会起第二个服务而不是聚焦已有窗口）。
+    这里统一按 bytes 收，再以 errors='replace' 解码：我们只关心 ASCII 部分
+    （pid 数字与 python/ifwe 进程名），替换字符不影响判断。
+    """
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=8, **_NO_WINDOW)
+    except Exception:
+        return ""
+    return (p.stdout or b"").decode("utf-8", "replace")
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        try:
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                 capture_output=True, text=True, timeout=8, **_NO_WINDOW)
-            return str(pid) in (out.stdout or "")
-        except Exception:
-            return False
+        out = _run_text(["tasklist", "/FI", f"PID eq {pid}", "/NH"])
+        return str(pid) in out
     try:
         os.kill(pid, 0)
         return True
@@ -101,12 +114,7 @@ def _is_our_process(pid: int) -> bool:
     """只清理「看起来是我们自己」的进程（python / IfWe），避免误杀复用了 PID 的无关程序"""
     if os.name != "nt":
         return True
-    try:
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                             capture_output=True, text=True, timeout=8, **_NO_WINDOW)
-        txt = (out.stdout or "").lower()
-    except Exception:
-        return False
+    txt = _run_text(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"]).lower()
     return ("python" in txt) or ("ifwe" in txt)
 
 

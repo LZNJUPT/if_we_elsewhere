@@ -17,7 +17,9 @@ _IMPORTERS: list[Importer] = []
 _LOADED = False
 
 # 内置格式 → 实现模块（懒加载；顺序即 auto_detect 优先级）
-_BUILTIN = ("chatlab_jsonl", "wecomsg_csv", "telegram_json")
+# plaintext 放最后：它最宽松（纯行流启发式），必须等其他结构化适配器先表态。
+_BUILTIN = ("chatlab_jsonl", "wecomsg_csv", "telegram_json",
+            "docx_text", "plaintext_lines")
 
 
 def _ensure_loaded() -> None:

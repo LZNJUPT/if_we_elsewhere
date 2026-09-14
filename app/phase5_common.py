@@ -90,17 +90,28 @@ def apply_schema(conn: sqlite3.Connection) -> None:
 
 # 全套结构（幂等 CREATE TABLE IF NOT EXISTS）。新库 / 新好友首次访问时用它建齐，
 # 否则 messages / relationship_state / turning_points 等表缺失会让上层查询直接报错。
-ALL_SCHEMAS = ("schema_v1.sql", "phase2_schema.sql", "phase4_schema.sql",
+ALL_SCHEMAS = ("schema_v1.sql", "schema_v2.sql", "phase2_schema.sql", "phase4_schema.sql",
                "phase5_schema.sql", "phase6_schema.sql", "schema_if.sql")
 
 
 def apply_all_schemas(conn: sqlite3.Connection) -> None:
-    """建齐全部结构（幂等）；顺序与 analyze_pipeline 保持一致，便于排查"""
+    """建齐全部结构（幂等）；顺序与 analyze_pipeline 保持一致，便于排查。
+
+    v2 升级：messages 的 source_id/dedup_key 两列**必须在 DDL 之后**补 —— 全新库里
+    那一刻 messages 还没被建出来，`ensure_v2_schema()` 会因「表不存在」而直接返回，
+    结果是 schema_v1 建出的 v1 版 messages 永远缺这两列（2026-09-14 实测到：
+    新建好友后库里的 messages 没有 v2 列，只有走导入的 build_db 才正确）。
+    """
     base = cfg_mod.resource_dir()          # 打包后 schema 在 _MEIPASS/app，不能按 __file__ 找
     for name in ALL_SCHEMAS:
         p = base / name
         if p.is_file():
             conn.executescript(p.read_text(encoding="utf-8"))
+    try:                                   # 延迟导入：phase1_ingest 拥有 messages 表定义
+        from phase1_ingest import ensure_v2_schema
+        ensure_v2_schema(conn)
+    except Exception:
+        pass
     conn.commit()
 
 
