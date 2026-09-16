@@ -108,6 +108,18 @@ DIAL_RULES = """
 """
 
 
+# ---------------------------------------------------------------- 人格保真（F1–F4）
+# ⚠ 本块必须在 DIAL_RULES 定义之后执行（否则 NameError 会被 except 吞掉、改动全部失效）。
+# pf 不可用时回退原行为：pf=None，say() 跳过意愿判定与原文窗口，规则用原常量。
+try:
+    import persona_fidelity as pf
+    pf.apply(loop)                             # F3: REPLY_RULES 替换 / F4: 去重护栏豁免
+    DIAL_RULES = pf.dial_rules(DIAL_RULES)     # F3: 产品态规则按情境取长度（关闭时原样返回）
+except Exception as _pf_err:                   # 失败必须可见，不许静默
+    print(f"[warn] persona_fidelity 未生效，人格保真改动回退原行为: {_pf_err}")
+    pf = None
+
+
 # ---------------------------------------------------------------- 事件启发式判定（零 token）
 # 顺序即优先级：命中多个时取优先级最高的一个
 EVENT_PRIORITY = [
@@ -253,6 +265,13 @@ class DialEngine:
         self.partner = loop.PersonaAgent(PARTNER, self.world)
         self.partner.persona_block = self.partner.persona_block + "\n" + DIAL_RULES
         self.partner.block_lite = self.partner.block_lite + "\n" + DIAL_RULES
+
+        # F4 豁免阈值：对方真实消息长度中位数（PersonaAgent 不持有 conn，由引擎注册）
+        if pf is not None:
+            try:
+                pf.register_exempt_len(pf.partner_median_len(self.conn))
+            except Exception:
+                pass
 
         # ---- 短期缓冲：从库中重建（保证进程重启后上下文不断）----
         self.wm = buf.WorkingMemory()
@@ -413,8 +432,42 @@ class DialEngine:
         self._put_message(session_id, day, HUMAN, user_text, meta={"human": True})
         self.wm.add(day, HUMAN, user_text)
 
-        # 2) 上下文装配：世界 + 改写场景卡 + 记忆(as_of=当天) + 缓冲
+        # 1.5) F1 回复意愿（架构级）：判不回则不生成、不调 LLM、落库沉默标记并返回。
+        #      沉默行仍计入会话轮次（时间照常流逝）；事件判定整段跳过——
+        #      否则空 reply 会兜底成「日常陪伴」，对方明明沉默、关系却还在被加热。
+        willingness = None
+        if pf is not None and pf.f1_enabled():
+            est = pf.estimate_reply_probability(
+                self.conn, sim_id=self.sim_id, start_day=self.start_day,
+                current_day=day, divergence_point=self.divergence_point)
+            willingness = est["p"]
+            if self.world.clock.rng.random() > willingness:
+                if self.verbose:
+                    print(f"  [意愿] TA 没回（P={willingness:.2f}，{est['layer']}，"
+                          f"近窗样本 {est['samples']}）")
+                self._put_message(session_id, day, PARTNER, "",
+                                  meta={"silent": True, "human": False,
+                                        "willingness": round(willingness, 4)})
+                return {"day": day, "user": user_text, "reply": "", "medium": "text",
+                        "action": "", "sticker": None, "emotion": None,
+                        "event": None, "event_note": None,
+                        "rel": dict(self.rel_current or {}),
+                        "session_id": session_id, "advanced_to": None,
+                        "silent": True, "willingness": willingness}
+
+        # 2) 上下文装配：真实原文窗口（F2，置于最前）+ 世界 + 改写场景卡 + 记忆 + 缓冲
         ws_text = self.world.summary_text(with_memories=False)
+        if pf is not None and pf.f2_enabled():
+            try:
+                win = pf.real_window_text(self.conn, start_day=self.start_day,
+                                          divergence_point=self.divergence_point,
+                                          has_rewrite=bool(self.rewritten_choice))
+            except Exception as e:
+                win = ""
+                if self.verbose:
+                    print(f"  [warn] 真实窗口加载失败: {str(e)[:80]}")
+            if win:
+                ws_text = win + "\n\n" + ws_text
         scene = self.world.divergence_scene()      # 分歧日只注入一次
         if scene:
             ws_text = ws_text + "\n" + scene
@@ -466,7 +519,8 @@ class DialEngine:
                 "sticker": sticker,
                 "emotion": reply_obj.emotion, "event": ev, "event_note": ev_note,
                 "rel": dict(self.rel_current or {}), "session_id": session_id,
-                "advanced_to": advanced}
+                "advanced_to": advanced,
+                "silent": False, "willingness": willingness}
 
 
 # ---------------------------------------------------------------- 线管理
@@ -546,14 +600,19 @@ def _fmt_rel(rel: dict | None) -> str:
 
 def _print_turn(res: dict) -> None:
     print(f"\n  你  {res['user']}")
-    shown = res["reply"]
-    if res["medium"] == "image":
-        shown = f"[图片] {shown}".strip()
-    elif res["medium"] == "emoji":
-        shown = f"[表情包] {shown}".strip()
-    elif res["medium"] == "voice":
-        shown = f"[语音] {shown}".strip()
-    print(f"  TA  {shown}" + (f"   （{res['action']}）" if res["action"] else ""))
+    if res.get("silent"):
+        w = res.get("willingness")
+        ptxt = f"   [意愿 P={w:.2f}]" if isinstance(w, (int, float)) else ""
+        print(f"  TA  （没回）{ptxt}")
+    else:
+        shown = res["reply"]
+        if res["medium"] == "image":
+            shown = f"[图片] {shown}".strip()
+        elif res["medium"] == "emoji":
+            shown = f"[表情包] {shown}".strip()
+        elif res["medium"] == "voice":
+            shown = f"[语音] {shown}".strip()
+        print(f"  TA  {shown}" + (f"   （{res['action']}）" if res["action"] else ""))
     note = res.get("event_note")
     if note:
         suffix = "" if note.get("counted") else "  → 故五维不变（设计如此）"
@@ -707,7 +766,8 @@ def cmd_selftest(args) -> None:
     for i, txt in enumerate(["在忙吗", "今天好累啊", "我们是不是很久没见了", "对不起"],
                             start=1):
         res = eng.say(txt)
-        print(f"[3.{i}] 回合 OK  {res['day']}  TA 回「{res['reply']}」  事件="
+        acted = "（没回·意愿判定）" if res.get("silent") else f"回「{res['reply']}」"
+        print(f"[3.{i}] 回合 OK  {res['day']}  TA {acted}  事件="
               f"{(res.get('event') or {}).get('event_type', '—')}  亲密="
               f"{(res.get('rel') or {}).get('closeness')}")
     n_msg = conn.execute("SELECT COUNT(*) FROM sim_messages WHERE sim_id=?",

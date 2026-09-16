@@ -116,8 +116,17 @@ function msgNode(m, hist) {
   } else {
     const b = document.createElement("div");
     b.className = "bubble";
-    // 真实记录的媒介占位符已在后端生成（text 里带了 [图片]/[表情包]），此处不再重复加前缀
-    b.textContent = (hist ? "" : mediumPrefix(m.medium)) + (text || "");
+    if (!hist && m.silent) {
+      // F5 沉默可见化：弱化样式 + tooltip 展示当时的回复意愿值（落库后刷新不丢）
+      b.classList.add("silent");
+      b.textContent = "（没回）";
+      const w = Number(m.willingness);
+      b.title = "TA 这轮没有回复"
+        + (Number.isFinite(w) ? `（当时的回复意愿 P=${w.toFixed(2)}）` : "");
+    } else {
+      // 真实记录的媒介占位符已在后端生成（text 里带了 [图片]/[表情包]），此处不再重复加前缀
+      b.textContent = (hist ? "" : mediumPrefix(m.medium)) + (text || "");
+    }
     body.appendChild(b);
   }
   if (!isMe && m.action) {
@@ -313,6 +322,10 @@ async function send() {
       body: JSON.stringify({ line: S.line, text }),
     });
     setTyping(false);
+    if (r.silent) {
+      const w = Number(r.willingness);
+      toast("TA 这轮没有回" + (Number.isFinite(w) ? `（意愿 P=${w.toFixed(2)}）` : ""));
+    }
     if (r.event_note) toast("事件：" + r.event_note.note);
     if (r.advanced_to) toast("时间来到 " + r.advanced_to);
     await refresh(S.line);

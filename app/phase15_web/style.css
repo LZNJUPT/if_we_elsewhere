@@ -63,6 +63,9 @@ button{font:inherit}
   white-space:pre-wrap;word-break:break-word;max-width:100%}
 .msg.me .bubble{background:var(--brand);color:#fff;border-bottom-right-radius:4px}
 .msg.her .bubble{background:#fff;border:1px solid var(--line);border-bottom-left-radius:4px;box-shadow:var(--shadow)}
+/* F5 沉默可见化：TA 没回的轮次渲染为弱化虚线气泡 */
+.msg.her .bubble.silent{background:transparent;border:1px dashed #d3d9e3;color:#9aa3b2;
+  box-shadow:none;font-size:12.5px;padding:6px 11px;cursor:default}
 .msg-meta{margin-top:4px;padding:0 3px;font-size:11px;color:#9aa3b2}
 .sticker{display:block;max-width:132px;max-height:172px;border-radius:10px;cursor:zoom-in;
   background:#f2f4f8;border:1px solid var(--line)}

@@ -140,6 +140,16 @@ _DEFAULTS: dict[str, Any] = {
         "auto_day_turns": 20,
         "seed": 42,
         "port": 8015,
+        # 人格保真（persona_fidelity）：F1 回复意愿 / F2 真实原文窗口。
+        # 总开关：环境变量 IFWE_PERSONA_FIDELITY=0 可整体关闭（回退改动前行为）。
+        "reply_willingness": {
+            "enabled": True,
+            "windows_days": [7, 14],   # 回复率统计窗口（两窗口取均值）
+            "fallback": 0.5,           # 样本不足时的中性值
+            "min_samples": 10,         # 条件化意愿层生效所需的最小样本数
+        },
+        "inject_real_window": True,    # F2（受 privacy.allow_llm_send 门禁）
+        "window_turns": 20,            # F2 注入的真实对话条数
     },
     "paths": {
         "data_dir": "data",

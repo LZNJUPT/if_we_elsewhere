@@ -257,6 +257,8 @@ def api_state(line: str | None = None, tail: int = 200):
                              "medium": m.get("medium", "text"),
                              "action": m.get("action", ""),
                              "sticker": m.get("sticker"),
+                             "silent": bool(m.get("silent")),
+                             "willingness": m.get("willingness"),
                              "human": bool(m.get("human")), "emotion": emo or ""})
         track = []
         for d, c, cf, t, e, q in conn.execute(
@@ -484,6 +486,8 @@ def api_say(body: SayBody):
     return {"day": res["day"], "reply": res["reply"], "medium": res["medium"],
             "action": res["action"], "sticker": res.get("sticker"),
             "event_note": res.get("event_note"),
+            "silent": bool(res.get("silent")),
+            "willingness": res.get("willingness"),
             "rel": res.get("rel"), "advanced_to": res.get("advanced_to")}
 
 
