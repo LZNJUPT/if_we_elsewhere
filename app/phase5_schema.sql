@@ -124,3 +124,67 @@ CREATE TABLE IF NOT EXISTS sim_working_mem (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_simwm_sim ON sim_working_mem(sim_id);
+-- ============================================================
+-- 决策观测日志（二期 Phase A · §11：观测与路径一致性，只加法不碰旧表）
+-- 与私有树 pipeline/phase5_schema.sql 尾部定义同名同源（勿单边改动）。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sim_decision_log (
+    log_id         TEXT PRIMARY KEY,
+    sim_id         TEXT NOT NULL,
+    session_id     TEXT,
+    day            TEXT,
+    turn_idx       INTEGER,
+    path           TEXT NOT NULL,
+    decided        INTEGER NOT NULL,
+    p_reply        REAL,
+    layer          TEXT,
+    samples        INTEGER,
+    n_branch       INTEGER,
+    p_real_only    REAL,
+    sfb_flag       INTEGER DEFAULT 0,
+    anchor_day     TEXT,
+    m              REAL,
+    reply_mode     TEXT,
+    silent_reason  TEXT,
+    stance_version TEXT,
+    evidence_ids   TEXT,
+    prompt_digest  TEXT,
+    state_before   TEXT,
+    state_after    TEXT,
+    source         TEXT,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_simdec_sim ON sim_decision_log(sim_id, day, turn_idx);
+
+-- ============================================================
+-- 分支状态持久化（二期 Phase B · §5.10；与私有树 pipeline/phase5_schema.sql 同名同源）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sim_branch_state (
+  sim_id TEXT PRIMARY KEY, rel_current TEXT, s_state TEXT, scene_state TEXT,
+  stance TEXT, calib TEXT, recent_texts TEXT, decision_tail TEXT,
+  version INTEGER DEFAULT 1, updated_at TEXT
+);
+
+-- ============================================================
+-- sim_messages 对话时间字段（二期 Phase B · §5.9 · 加法迁移）
+-- 幂等迁移由 phase5_common.ensure_time_columns() 负责（DialEngine.__init__ 调用）。
+--   ALTER TABLE sim_messages ADD COLUMN sent_at     TEXT;
+--   ALTER TABLE sim_messages ADD COLUMN time_source TEXT;
+-- 排序键统一 (day, turn_idx, rowid)；created_at 只作审计。
+-- ============================================================
+
+
+-- ============================================================
+-- 行动决策日志（二期 Phase C · §6.1E；与私有树 pipeline/phase5_schema.sql 同名同源）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sim_action_log (
+  action_id TEXT PRIMARY KEY, sim_id TEXT NOT NULL, session_id TEXT,
+  day TEXT, turn_idx INTEGER, path TEXT,
+  reply_mode TEXT, should_generate INTEGER, p_reply REAL,
+  scene_mode TEXT, boundary_pressure TEXT,
+  event_type TEXT, rel_delta TEXT,
+  must_not_do TEXT, decision_reason TEXT,
+  generation_violation INTEGER DEFAULT 0, violation_note TEXT,
+  model_version TEXT, evidence_ids TEXT, created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_simact_sim ON sim_action_log(sim_id, day, turn_idx);

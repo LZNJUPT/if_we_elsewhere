@@ -88,6 +88,24 @@ def apply_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_time_columns(conn: sqlite3.Connection) -> None:
+    """sim_messages 增补对话时间字段（二期 §5.9 · 加法迁移，幂等可重复执行）。
+
+    - sent_at     TEXT : 对话时间（ISO）。user_input 行=真实输入时刻；
+      simulated 行=分支日（day，日期粒度——模拟侧无对话时刻，不伪造精度）。
+    - time_source TEXT : user_input / simulated / unknown。
+    排序键统一 (day, turn_idx, rowid)；created_at 只作审计，任何逻辑不得读它
+    （§14 禁令）；迁移期 sent_at IS NULL 的旧行按 (day, turn_idx) 处理，
+    不得回退到 created_at。与私有树 phase5_common.ensure_time_columns 同名同源。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sim_messages)")}
+    if "sent_at" not in cols:
+        conn.execute("ALTER TABLE sim_messages ADD COLUMN sent_at TEXT")
+    if "time_source" not in cols:
+        conn.execute("ALTER TABLE sim_messages ADD COLUMN time_source TEXT")
+    conn.commit()
+
+
 # 全套结构（幂等 CREATE TABLE IF NOT EXISTS）。新库 / 新好友首次访问时用它建齐，
 # 否则 messages / relationship_state / turning_points 等表缺失会让上层查询直接报错。
 ALL_SCHEMAS = ("schema_v1.sql", "schema_v2.sql", "phase2_schema.sql", "phase4_schema.sql",
@@ -290,13 +308,27 @@ class WorldState:
                 f"（可以是开场白、回应或行动的暗示），必须符合两人真实人格与说话风格——"
                 f"即使 B 依然怕、依然谨慎，TA 的选择已经不同于以往，要在言行中体现出来。")
 
-    def summary_text(self, with_memories: bool = True) -> str:
-        """拼给 Agent 的『当前世界状态』文本（派生，只读视图）"""
+    def summary_text(self, with_memories: bool = True,
+                     rel_override: Optional[dict] = None) -> str:
+        """拼给 Agent 的『当前世界状态』文本（派生，只读视图）
+
+        rel_override（二期 §5.6，与私有树同名同源）：分支当前关系状态
+        （DialEngine.rel_current）。None（默认）= 原行为（世界锄点，
+        run_simulation 行为不变）；传入 dict 时展示**分支推断状态**，
+        文案标注「本分支，推断」。
+        """
         lines = [f"今天是 {self.day}，关系分支「{self.branch_name}」。"]
         if self.divergence_point and self.day >= self.divergence_point:
             lines.append(f"【最重要·改写已生效】{self.divergence_desc or '改写已生效'} "
                          f"→ {self.rewritten_choice or ''}")
-        if self.rel_state:
+        if rel_override:
+            r = rel_override
+            lines.append("当前关系状态（本分支，推断）：亲密度={} 冲突指数={} 信任={} "
+                         "情绪安全={} 沟通质量={}（置信度{}）".format(
+                r.get("closeness"), r.get("conflict"), r.get("trust"),
+                r.get("emotional_safety"), r.get("comm_quality"),
+                r.get("confidence")))
+        elif self.rel_state:
             r = self.rel_state
             lines.append("当前关系状态（截至 {}，只读）：亲密度={} 冲突指数={} 信任={} "
                          "情绪安全={} 沟通质量={}（置信度{}）".format(

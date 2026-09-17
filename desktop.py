@@ -38,6 +38,10 @@ for _p in (str(ROOT), str(ROOT / "app")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# 二期完整体验：立场/行动决策/表达层（phase17_stance_action）。
+# 用 setdefault：用户显式设置的环境变量优先；想回退旧行为可设 legacy 或 phase16_fixes。
+os.environ.setdefault("IFWE_ENGINE_MODE", "phase17_stance_action")
+
 LOCK_NAME = ".ifwe.lock"
 PORT_TRIES = 24
 _NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}   # CREATE_NO_WINDOW

@@ -33,7 +33,8 @@ REWRITE_KEYWORDS = ["复合", "试试", "先当朋友", "机会", "边界", "愿
 
 class PersonaAgent:
     """对称独立的双 Agent 之一：人格 + S 层情绪状态 + PCC 校准 + 媒介/去重护栏"""
-    def __init__(self, person: str, world: pc.WorldState):
+    def __init__(self, person: str, world: pc.WorldState,
+                 similarity_policy=None):
         self.person = person                       # A / B
         self.name = SENDER_NAME[person]
         self.persona_block = world.persona_blocks[person]
@@ -48,6 +49,9 @@ class PersonaAgent:
             "A": {"text": 0.58, "image": 0.22, "emoji": 0.15, "voice": 0.05},
             "B": {"text": 0.66, "image": 0.16, "emoji": 0.14, "voice": 0.04},
         }
+        # 去重护栏策略（二期 §10.9）：callable(text)->bool|None（None=交回默认判定）。
+        # None = 默认 bigram Jaccard≥0.45；禁止再用模块级改写类属性的方式替换护栏。
+        self.similarity_policy = similarity_policy
 
     def update_emotion(self, emotion: dict) -> None:
         if isinstance(emotion, dict):
@@ -72,17 +76,42 @@ class PersonaAgent:
             best = max(best, len(t & rs) / len(t | rs))
         return best
 
+    def _should_rewrite(self, text: str, action=None) -> bool:
+        """去重护栏判定（§10.9 可注入策略；§11 Phase C：boundary 不拦）。
+
+        优先级：
+          1. boundary 行动（坚定重申立场）永不重写——划界的本质就是重复重申（T10）；
+          2. 注入的 similarity_policy（如 F4 长度中位数豁免）；
+          3. 默认 bigram Jaccard≥0.45。
+        """
+        if action is not None and getattr(action, "reply_mode", "") == "boundary":
+            return False
+        if self.similarity_policy is not None:
+            v = self.similarity_policy(text)
+            if v is not None:
+                return bool(v)          # None = 交回默认判定（F4 短回复豁免后的透传）
+        return self._recent_similarity(text) >= 0.45
+
     def act(self, client, ws_text: str, memories_text: str, buffer_text: str,
-            last_msg: str, rng=None, full_persona: bool = False) -> AgentReply:
+            last_msg: str, rng=None, full_persona: bool = False,
+            action=None) -> AgentReply:
         """一次『决策-行动』：读世界 → 检索记忆 → 结合情绪 → 生成回复/行动。
-        full_persona=首回合用全量人格；其余回合用精简卡。rng 用于媒介抽样(可复现)。"""
+        full_persona=首回合用全量人格；其余回合用精简卡。rng 用于媒介抽样(可复现)。
+        action：本轮 ActionDecision（phase17 模式传入；约束注入生成提示、
+        boundary 豁免去重护栏——§6.2 步骤 7/8）。"""
         sys = (self.persona_block if full_persona else self.block_lite) + "\n\n" + REPLY_RULES
+        extra_constraint = ""
+        if action is not None:
+            hint = getattr(action, "generation_hint", "")
+            if hint:
+                extra_constraint = "\n\n" + hint
         user = reply_user_block(ws_text, memories_text, buffer_text, last_msg,
-                                self.s_state, self.calib)
+                                self.s_state, self.calib) + extra_constraint
         obj = client.extract(system=sys, user=user, response_model=AgentReply)
         # 媒介抽样（确定性，按人格倾向）
         if rng is not None:
-            probs = self.medium_probs.get(self.person, self.medium_probs["A"])
+            probs = (self.medium_probs.get(self.person)
+                     or self.medium_probs.get("A") or {"text": 1.0})
             roll = rng.random()
             acc, medium = 0.0, "text"
             for m, p in probs.items():
@@ -91,8 +120,8 @@ class PersonaAgent:
                     medium = m
                     break
             obj.medium = medium
-        # 去重护栏：与近 3 条自己的消息过度相似 → 强制换一种说法重写一次
-        if obj.reply.strip() and self._recent_similarity(obj.reply) >= 0.45:
+        # 去重护栏：过度相似 → 强制换一种说法重写一次（可注入策略 + boundary 豁免，§10.9/T10）
+        if obj.reply.strip() and self._should_rewrite(obj.reply, action):
             extra = ("\n\n【重写要求】你刚才的说法和此前一条重复度太高。请换一种说法：换个角度、"
                      "换个具体细节或岔开一个自然的新话头，不要照搬刚才的用词。")
             try:
@@ -144,6 +173,14 @@ def _person_of_summary(summary: str) -> str:
 
 
 def log_event(conn, sim_id: str, day: str, ev: dict, source_session: str) -> str:
+    # 登记校验（二期 §5.8 第 3 点 / T11）：未登记 DEFAULT_RULES 的事件类型
+    # 会产生「记了事件但 event_delta 返回 {} 状态不动」的幽灵——报错而非静默落库。
+    import phase6_engine as p6
+    et = ev.get("event_type", "")
+    if et not in p6.DEFAULT_RULES:
+        raise ValueError(
+            f"未登记的事件类型: {et!r}（event_type 必须先在 phase6_engine.DEFAULT_RULES "
+            f"登记 dims/推导出处后再写入，§5.8/§14）")
     # 序号取 MAX+1（而非 COUNT+1）：事件被部分删除后 COUNT 会回退，导致主键冲突（Phase 15 实测）
     seq = conn.execute("SELECT MAX(CAST(substr(event_id, -3) AS INTEGER)) FROM sim_events "
                        "WHERE sim_id=?", (sim_id,)).fetchone()[0] or 0

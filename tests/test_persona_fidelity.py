@@ -105,6 +105,12 @@ class PFBase(unittest.TestCase):
             (f"{sim_id}-T{turn:03d}", sim_id, f"{sim_id}-S001", day, turn, sender,
              content, "", meta, pc.now_str()))
 
+    def seed_runs(self, sim_id: str, start_day: str) -> None:
+        """补一条 sim_runs 行（paired_window_rate / 锚定语义需要 branch_start）"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sim_runs (sim_id, branch_name, start_day, status, created_at) "
+            "VALUES (?, '测试分支', ?, 'running', ?)", (sim_id, start_day, pc.now_str()))
+
     def commit(self) -> None:
         self.conn.commit()
 
@@ -166,30 +172,44 @@ class TestWillingness(PFBase):
                                             current_day="2026-07-06")
         self.assertGreaterEqual(est["p"], 0.6, est)
 
-    def test_branch_silent_marker_is_not_a_reply(self):
-        """分支内的沉默标记行（B 侧空内容）不得被当成「对方回复了」"""
+    def test_branch_ignores_branch_data_and_falls_back(self):
+        """锚定（裁定三 §5.1/§5.5）：分支模式下 P 只用分支起点前的真实 messages；
+        分支内内容（含沉默标记与真实回复）都不进分子分母；无真实样本 →
+        layer=fallback、P=0.5，不得 0.0"""
         sid = "SIM-TEST01"
+        self.seed_runs(sid, "2026-07-20")
         self.add_branch(sid, "2026-07-20", 1, "A", "在吗")
         self.add_branch(sid, "2026-07-20", 2, "B", "",
-                        meta='{"silent": true, "willingness": 0.1}')
+                        meta='{"silent": true, "kind": "silent", "willingness": 0.1}')
         self.add_branch(sid, "2026-07-20", 3, "A", "还在吗")
         self.commit()
         est = pf.estimate_reply_probability(self.conn, sim_id=sid,
                                             start_day="2026-07-20",
                                             current_day="2026-07-20")
-        self.assertEqual(est["layer"], "global")
-        self.assertEqual(est["p"], 0.0, est)      # 唯一样本（第 1 条 A）未被回应
+        self.assertEqual(est["layer"], "fallback", est)
+        self.assertEqual(est["p"], 0.5, "锚定：无真实样本 → fallback 0.5，不得 0.0")
+        self.assertEqual(est["n_branch"], 0)
+        self.assertEqual(est["anchor_day"], "2026-07-20")
+        # 时间线层：silent 行仍不算「她说过话」
+        tl = pf._timeline(self.conn, sim_id=sid, start_day="2026-07-20",
+                          current_day="2026-07-20")
+        self.assertIn(False, [r[2] for r in tl if r[1] == "B"])
 
-    def test_branch_reply_counts(self):
+    def test_branch_real_reply_counts_in_local_rate(self):
+        """分支内真实 B 回复只在「局部率」诊断里计数（paired_window_rate），
+        不进锚定 P（裁定三）"""
         sid = "SIM-TEST02"
+        self.seed_runs(sid, "2026-07-20")
         self.add_branch(sid, "2026-07-20", 1, "A", "在吗")
-        self.add_branch(sid, "2026-07-20", 2, "B", "在的怎么了")
+        self.add_branch(sid, "2026-07-20", 2, "B", "在的怎么了", meta='{"kind": "reply"}')
         self.add_branch(sid, "2026-07-20", 3, "A", "没事就想问问")
         self.commit()
         est = pf.estimate_reply_probability(self.conn, sim_id=sid,
                                             start_day="2026-07-20",
                                             current_day="2026-07-20")
-        self.assertGreaterEqual(est["p"], 0.9, est)
+        self.assertEqual(est["n_branch"], 0, "分支内容不进锚定 P")
+        rate, n_a = pf.paired_window_rate(self.conn, "2026-07-21", 7, sim_id=sid)
+        self.assertEqual((rate, n_a), (1.0, 2), "局部率诊断：两条 A 都被真实回复")
 
 
 class TestEngineSilentTurn(PFBase):

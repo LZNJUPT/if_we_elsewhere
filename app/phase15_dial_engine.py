@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -51,8 +52,24 @@ from pathlib import Path
 from typing import Optional
 
 import config as cfg_mod
+import phase17_observe as observe
+import phase17_state as bstate
+import phase17_stance as st17
+import phase17_action as act17
 import phase4_retrieval
 import phase5_a2_loop as loop
+
+
+# ---------------------------------------------------------------- 引擎模式（§12 统一开关）
+# IFWE_ENGINE_MODE = legacy | phase16_fixes | phase17_stance_action
+# 未设置时按旧开关映射（向后兼容）：IFWE_PERSONA_FIDELITY=0 → legacy，否则 phase16_fixes。
+def _engine_mode() -> str:
+    m = (os.environ.get("IFWE_ENGINE_MODE", "") or "").strip().lower()
+    if m in ("legacy", "phase16_fixes", "phase17_stance_action"):
+        return m
+    if (os.environ.get("IFWE_PERSONA_FIDELITY", "") or "").strip().lower() in             {"0", "false", "off", "no"}:
+        return "legacy"
+    return "phase16_fixes"
 import phase5_a3_buffer as buf
 import phase5_common as pc
 import phase6_engine as p6
@@ -62,6 +79,7 @@ HUMAN = "A"          # 用户本人
 PARTNER = "B"        # 数字人格
 KIND = "dial"        # 线类型标记（写入 sim_runs.config_json）
 
+# 口径=【回合计数】（§5.9：一次 say() 计一回合，沉默计入；数据出处：真实有消息日均 19.4 条）
 AUTO_DAY_TURNS = int(cfg_mod.load()["defaults"]["auto_day_turns"])
 MEM_TOP_K = 5
 # 同类型事件当天最多计权次数（第 2 次衰减 ≈0.5 倍，第 3 次起不计）
@@ -190,16 +208,21 @@ EVENT_SEV_IMP = {
 STICKER_NAME = re.compile(r"^[0-9a-f]{32}\.(gif|jpg|jpeg|png)$", re.I)
 
 
-def classify_event(user_text: str, reply_text: str) -> dict:
-    """零成本启发式：把一次往返判定为 0-1 个关系事件（复用 Phase 6 规则表的事件类型）。
-    取白话依据：真实数据里事件是「会话级」抽取的，这里则按「一次往返」判定，
-    并由调用方按天去重（同类型一天只计一次），避免日粒度重复累加。"""
-    blob = f"{user_text or ''} {reply_text or ''}"
+def classify_user_event(user_text: str) -> dict:
+    """零成本启发式：只看【用户消息】判定 0-1 个关系事件（二期 §5.7，与私有树同名同源）。
+
+    与旧 classify_event(user_text, reply_text) 的区别（§5.7 硬要求）：
+      - 删掉 reply_text 入参：生成文本不再驱动关系状态；
+      - 在回复决策【之前】调用；
+      - 兜底「日常陪伴」只在 B 确实回应（有来回）时由 say() 补上；
+        reply_mode=none（沉默）→ 记「未回复」，不计权。
+    事件类型仍取 12 类坐标系（§14：保留 + 扩展，勿删）。
+    """
+    blob = user_text or ""
     for et in EVENT_PRIORITY:
         kws = EVENT_KEYWORDS.get(et)
-        if kws is None:            # 日常陪伴：兜底（有来回即算）
-            sev, imp = EVENT_SEV_IMP[et]
-            return {"event_type": et, "severity": sev, "importance": imp}
+        if kws is None:            # 日常陪伴：兜底（有来回才启用，见 say()）
+            continue
         if any(_keyword_hit(blob, k) for k in kws):
             sev, imp = EVENT_SEV_IMP[et]
             # 情绪强度微调：出现连续感叹/问号则升一级
@@ -245,10 +268,16 @@ class DialEngine:
         self.branch_name, self.start_day, self.divergence_point, self.divergence_desc, \
             self.rewritten_choice, cfg_raw = row
         self.cfg = json.loads(cfg_raw or "{}")
+        # Phase A 路径标记：kind=replay 的线（回放装置）→ path=replay，其余 product；
+        # 只影响观测落库，不影响任何行为。
+        self.path = observe.PATH_REPLAY if self.cfg.get("kind") == "replay" \
+            else observe.PATH_PRODUCT
         self.run_state = self.cfg.setdefault("run_state", {
             "day_start_rel": None, "day_events": [], "rel_current": None,
             "session_id": None, "session_day": None, "last_day": None,
         })
+        # §5.9：sim_messages 对话时间字段（加法迁移，幂等）——任何写入都带 sent_at/time_source
+        pc.ensure_time_columns(conn)
 
         # ---- 世界（复用 build_world：persona + 截至 start_day 的真实关系状态）----
         self.world = pc.build_world(
@@ -262,16 +291,55 @@ class DialEngine:
         self.world.clock.set_end("2099-12-31")
 
         # ---- B 的数字人格（只实例化 B；A 由用户本人替代）----
-        self.partner = loop.PersonaAgent(PARTNER, self.world)
+        # F4 去重护栏豁免 = 可注入策略（§10.9）：短回复（≤对方真实长度中位数，数据推导）
+        # 豁免改写，长复读仍保留护栏；boundary 行动的豁免在 PersonaAgent._should_rewrite 内。
+        _f4_med = None
+        if pf is not None:
+            try:
+                _f4_med = pf.partner_median_len(self.conn)
+                pf.register_exempt_len(_f4_med)      # 兼容旧路径语义
+            except Exception:
+                _f4_med = None
+
+        def _f4_similarity_policy(text: str):
+            """F4 策略：短回复豁免（False）、长文本交回默认 bigram 判定（None）。"""
+            if _f4_med is not None and len((text or "").strip()) <= _f4_med:
+                return False
+            return None
+
+        self.partner = loop.PersonaAgent(PARTNER, self.world,
+                                         similarity_policy=_f4_similarity_policy)
         self.partner.persona_block = self.partner.persona_block + "\n" + DIAL_RULES
         self.partner.block_lite = self.partner.block_lite + "\n" + DIAL_RULES
 
-        # F4 豁免阈值：对方真实消息长度中位数（PersonaAgent 不持有 conn，由引擎注册）
-        if pf is not None:
+        # ---- 引擎模式与当前立场（Phase C · §6.1C）：分支起点推断一次并缓存 ----
+        self.phase17 = _engine_mode() == "phase17_stance_action"   # 运行期读取（测试可切换）
+        self._stance = None
+        if self.phase17 and pf is not None:
             try:
-                pf.register_exempt_len(pf.partner_median_len(self.conn))
-            except Exception:
-                pass
+                est = pf.estimate_reply_probability(
+                    self.conn, sim_id=self.sim_id, start_day=self.start_day,
+                    current_day=self.start_day)
+                self._stance = st17.infer_stance(self.conn, self.start_day,
+                                                 p_anchor=est.get("p"))
+            except Exception as e:
+                if self.verbose:
+                    print(f"  [warn] 立场推断失败（不阻断，MVP 用空立场）: {str(e)[:80]}")
+                self._stance = st17.infer_stance(self.conn, self.start_day, p_anchor=None)
+            self._meta_detector = st17.make_meta_detector(self.client)   # §8.2 结构化判定
+            # §11 Phase E：表达层画像（真实 B 消息当前段推导）→ 媒介抽样条件化
+            try:
+                import phase17_expression as ex
+                self._profile = ex.expression_profile(self.conn, self.start_day)
+                if self._profile.get("medium_probs"):
+                    self.partner.medium_probs = {
+                        "A": dict(self.partner.medium_probs.get("A")
+                                  or self._profile["medium_probs"]),
+                        "B": dict(self._profile["medium_probs"])}
+            except Exception as e:
+                if self.verbose:
+                    print(f"  [warn] 表达画像失败（用默认媒介倾向）: {str(e)[:80]}")
+                self._profile = None
 
         # ---- 短期缓冲：从库中重建（保证进程重启后上下文不断）----
         self.wm = buf.WorkingMemory()
@@ -279,12 +347,23 @@ class DialEngine:
             self.wm.add(day, sender, content)
 
         # ---- 分支内关系状态 ----
-        if self.run_state.get("rel_current"):
+        # §5.10：优先从 sim_branch_state 恢复（含 PersonaAgent 的 s_state/calib/
+        # recent_texts）；sim_runs.run_state 仅作向后兼容回退。
+        restored = bstate.load(conn, self.sim_id) or {}
+        if restored.get("rel_current"):
+            self.rel_current = dict(restored["rel_current"])
+        elif self.run_state.get("rel_current"):
             self.rel_current = dict(self.run_state["rel_current"])
         else:
             self.rel_current = dict(self.world.rel_state or {}) or None
             if self.rel_current:
                 self.run_state["rel_current"] = dict(self.rel_current)
+        if restored.get("s_state"):
+            self.partner.s_state = dict(restored["s_state"])
+        if restored.get("calib") is not None:
+            self.partner.calib = restored["calib"]
+        if restored.get("recent_texts"):
+            self.partner.recent_texts = list(restored["recent_texts"])
         if not self.run_state.get("day_start_rel") and self.rel_current:
             self.run_state["day_start_rel"] = dict(self.rel_current)
 
@@ -321,23 +400,86 @@ class DialEngine:
 
     def _put_message(self, session_id: str, day: str, sender: str, content: str,
                      emotion_s: str = "", meta: dict | None = None) -> int:
+        """落一条消息。§5.9：sent_at=对话时间（A=真实输入时刻 user_input；
+        B=分支日 simulated，模拟侧无对话时刻，不伪造精度、不读 created_at）。
+        §5.2：B 侧 meta.kind 显式区分 reply / silent，便于审计与统计排除。"""
         turn = self._next_turn(session_id)
+        if sender == HUMAN:
+            sent_at, tsrc = pc.now_str(), "user_input"
+        else:
+            sent_at, tsrc = day, "simulated"
+        if sender == PARTNER:
+            kind = "silent" if not (content or "").strip() else "reply"
+            meta = {"kind": kind, **(meta or {})}
         self.conn.execute(
             "INSERT OR REPLACE INTO sim_messages (msg_id, sim_id, session_id, day, turn_idx, "
-            "sender, content, emotion_s, meta, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "sender, content, emotion_s, meta, created_at, sent_at, time_source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (f"{session_id}-T{turn:03d}", self.sim_id, session_id, day, turn,
-             sender, content, emotion_s, json.dumps(meta or {}, ensure_ascii=False), pc.now_str()))
+             sender, content, emotion_s, json.dumps(meta or {}, ensure_ascii=False),
+             pc.now_str(), sent_at, tsrc))
         self.conn.execute("UPDATE sim_sessions SET n_turns=? WHERE session_id=?",
                           (turn + 1, session_id))
         self.conn.commit()
         return turn
+
+    def _rounds_in_session(self, session_id: str) -> int:
+        """本会话已进行的回合计数（§5.9：口径=用户消息条数；沉默计入回合）。"""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM sim_messages WHERE session_id=? AND sender=?",
+            (session_id, HUMAN)).fetchone()[0]
 
     def _save_state(self) -> None:
         self.cfg["run_state"] = self.run_state
         self.cfg["kind"] = KIND
         self.conn.execute("UPDATE sim_runs SET config_json=? WHERE sim_id=?",
                           (json.dumps(self.cfg, ensure_ascii=False), self.sim_id))
+        # §5.10：同时写 sim_branch_state（结构化、带版本；run_state 为向后兼容）
+        try:
+            decision_tail = None
+            try:
+                ds = observe.read_decisions(self.conn, self.sim_id, limit=1)
+                decision_tail = ds[-1] if ds else None
+            except Exception:
+                pass
+            bstate.save(self.conn, self.sim_id,
+                        rel_current=self.rel_current,
+                        s_state=getattr(self.partner, "s_state", None),
+                        calib=getattr(self.partner, "calib", None),
+                        recent_texts=getattr(self.partner, "recent_texts", None),
+                        decision_tail=decision_tail)
+        except Exception as e:
+            if self.verbose:
+                print(f"  [warn] 分支状态落库失败（不影响对话）: {str(e)[:80]}", flush=True)
         self.conn.commit()
+
+    def _silent_return(self, session_id: str, day: str, turn_a: int, user_text: str,
+                       action, snap, rel_before: dict, gate_reason, auto_day: bool) -> dict:
+        """phase17 模式沉默轮收尾：落 silent 标记、决策观测、回合计数、状态保存"""
+        p_rep = action.p_reply or 0.0
+        self._put_message(session_id, day, PARTNER, "",
+                          meta={"kind": "silent", "medium": "none", "action": "",
+                                "human": False, "silent": True,
+                                "p_reply": round(p_rep, 3)})
+        self._log_decision(session_id=session_id, day=day, turn_idx=turn_a,
+                           decided=0, snapshot=snap, p_reply=p_rep,
+                           reply_mode="none",
+                           silent_reason=gate_reason,
+                           state_before=rel_before,
+                           state_after=dict(self.rel_current or {}),
+                           source=action.model_version)
+        if self.verbose:
+            print(f"  ·  她没回（P(reply)={p_rep:.2f}，{action.decision_reason[:40]}）")
+        advanced = None
+        if auto_day and self._rounds_in_session(session_id) >= AUTO_DAY_TURNS:
+            advanced = self.advance_day(1)      # §5.9：沉默计入回合
+        self._save_state()                       # §5.10
+        return {"day": day, "user": user_text, "reply": "", "medium": "none",
+                "action": "", "sticker": None, "emotion": None, "event": None,
+                "event_note": {"event_type": "未回复", "times": 1, "counted": False,
+                               "note": f"她没回（P(reply)={p_rep:.2f}）"},
+                "rel": dict(self.rel_current or {}), "session_id": session_id,
+                "advanced_to": advanced, "silent": True, "willingness": p_rep}
 
     # ---------------- 关系状态（当天累计事件 + 幂等重算）----------------
     def _commit_rel(self, day: str) -> None:
@@ -345,10 +487,50 @@ class DialEngine:
         if not base:
             return
         events = self.run_state.get("day_events") or []
-        self.rel_current = p6.update_rel_state_engine(
-            self.conn, self.sim_id, day, dict(base), events, anchor=self.world.rel_state)
+        if self.phase17:
+            # 【§5.8 · Phase C】关系增量门控：产品路径下事件增量经立场门控
+            # （拒绝立场/极低联系档 → 正向维不加热），仍为幂等重算（base+全部门控增量）。
+            # 12 类坐标系保留（事件照记照算），只改「增量是否生效」。
+            eng = p6.RelEngine()
+            anchor = self.world.rel_state or {"closeness": 5.26, "conflict": 4.25,
+                                              "trust": 4.54, "emotional_safety": 3.31,
+                                              "comm_quality": 8.52}
+            s = dict(base)
+            for ev in events:
+                gd = st17.gated_delta(self._stance or {}, eng.event_delta(ev))
+                for d, v in gd.items():
+                    s[d] = s.get(d, 5.0) + v
+            for d in p6.DIMS:
+                b = anchor.get(d) or 5.0
+                s[d] = round(min(10.0, max(0.0, 0.99 * s.get(d, b) + 0.01 * b)), 3)
+            self.conn.execute(
+                """INSERT OR REPLACE INTO sim_rel_state
+                   (sim_id, day, closeness, conflict, trust, emotional_safety, comm_quality,
+                    confidence, method, notes) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (self.sim_id, day, s["closeness"], s["conflict"], s["trust"],
+                 s["emotional_safety"], s["comm_quality"], 0.45, "engine_gated",
+                 "phase17 立场门控增量 + 0.99 稳态回归锚点"))
+            self.conn.commit()
+            self.rel_current = s
+        else:
+            self.rel_current = p6.update_rel_state_engine(
+                self.conn, self.sim_id, day, dict(base), events, anchor=self.world.rel_state)
         self.run_state["rel_current"] = dict(self.rel_current)
         self._save_state()
+
+    def _anchored_p(self) -> float:
+        """分支锚定 P（裁定三）：优先取立场推断时缓存的 p_anchor；
+        无值（推断失败/无样本）→ config fallback（§5.11 同语义，不得 0.0）。"""
+        try:
+            pa = (self._stance or {}).get("p_anchor")
+            if pa is not None:
+                return float(pa)
+        except Exception:
+            pass
+        try:
+            return float(pf._wcfg().get("fallback", 0.5))
+        except Exception:
+            return 0.5
 
     def _note_event(self, day: str, session_id: str, ev: dict, why: str) -> Optional[dict]:
         """当天事件计权：同类型第 1 次全额；第 2 次衰减（sev/imp 降级 ≈0.5 倍）；
@@ -372,6 +554,15 @@ class DialEngine:
                        {**ev, "summary": (ev.get("summary") or why)[:30]}, session_id)
         self._commit_rel(day)
         return {"event_type": et, "times": n, "counted": True, "note": note}
+
+    def _log_decision(self, **kw) -> None:
+        """Phase A 决策观测：失败只警告，绝不连累对话主流程（观测不改变行为）"""
+        try:
+            observe.log_decision(self.conn, sim_id=self.sim_id,
+                                 path=self.path, **kw)
+        except Exception as e:
+            if self.verbose:
+                print(f"  [warn] 决策观测落库失败: {str(e)[:80]}", flush=True)
 
     # ---------------- 真实表情包 ----------------
     def _available_media(self) -> set[str]:
@@ -420,6 +611,59 @@ class DialEngine:
             print(f"  ── 时间来到 {day}（自 {old}）──")
         return day
 
+    # ---------------- 主动开口（§6.1E initiate · §11 Phase E）----------------
+    def initiate_turn(self) -> dict | None:
+        """她主动开口的一轮（无用户输入）。掷骰概率=真实 B 先开口天占比；
+        拒绝立场下开场约束为事务性简短（立场约束优先于表达层）。"""
+        if not self.phase17 or not getattr(self, "_profile", None):
+            return None
+        import phase17_expression as ex
+        if not ex.initiate_check(self._profile, self.world.clock.rng):
+            return None
+        day = self.world.day
+        session_id = self._ensure_session(day)
+        turn_idx = self._next_turn(session_id)
+        rejected = (self._stance or {}).get("romantic_intent") == "明确拒绝"
+        action = act17.ActionDecision(
+            reply_mode="initiate", should_generate=True,
+            p_reply=self._anchored_p(), scene_mode="主动开口",
+            event_type="日常陪伴" if not rejected else None,
+            must_not_do=["推进关系", "表达思念", "重提复合"] if rejected else [],
+            generation_hint=("【本轮行动约束】由你主动开口。"
+                             + ("保持事务性、简短（如分享一件具体小事），"
+                                "不做情感推进、不表达思念。" if rejected
+                                else "自然开场，符合当前关系状态。")),
+            decision_reason=f"主动开口掷骰命中（真实开口率={self._profile.get('initiation_rate')}）",
+            evidence_ids=list((self._stance or {}).get("evidence_ids") or []),
+            initiate=True)
+        act17.apply_expression(action, self._profile)
+        act17.log_action(self.conn, sim_id=self.sim_id, session_id=session_id,
+                         day=day, turn_idx=turn_idx, path=self.path, action=action)
+        ws_text = self.world.summary_text(with_memories=False,
+                                          rel_override=self.rel_current)
+        reply_obj = self.partner.act(self.client, ws_text, "", self.wm.render(),
+                                     "（她主动发来一条消息）", rng=self.world.clock.rng,
+                                     full_persona=True, action=action)
+        self._put_message(session_id, day, PARTNER, reply_obj.reply or "",
+                          emotion_s=str((reply_obj.emotion or {}).get("label", "")),
+                          meta={"medium": reply_obj.medium, "action": reply_obj.action,
+                                "human": False, "initiated": True, "kind": "reply"})
+        self.wm.add(day, PARTNER, reply_obj.reply or "")
+        if not rejected and action.event_type:
+            try:
+                self._note_event(day, session_id,
+                                 {"event_type": action.event_type, "severity": 1,
+                                  "importance": 1,
+                                  "summary": f"主动开口：{(reply_obj.reply or '')[:14]}"},
+                                 "initiate")
+            except Exception:
+                pass
+        self._save_state()
+        return {"day": day, "reply": reply_obj.reply or "", "medium": reply_obj.medium,
+                "action_obj": {"reply_mode": action.reply_mode,
+                               "decision_reason": action.decision_reason},
+                "session_id": session_id}
+
     # ---------------- 核心：一次往返 ----------------
     def say(self, user_text: str, auto_day: bool = True) -> dict:
         user_text = (user_text or "").strip()
@@ -429,18 +673,62 @@ class DialEngine:
         session_id = self._ensure_session(day)
 
         # 1) 用户消息（human 标记，永不改写成 A 的 LLM 版本）
-        self._put_message(session_id, day, HUMAN, user_text, meta={"human": True})
+        turn_a = self._put_message(session_id, day, HUMAN, user_text,
+                                   meta={"human": True})
         self.wm.add(day, HUMAN, user_text)
+        rel_before = dict(self.rel_current or {})      # Phase A：决策前状态快照
+
+        # 1.2)【§5.7】先识别本轮用户事件（零 token，只看用户消息），再决定 B 的行动
+        ev_user = classify_user_event(user_text)
+
+        # 1.3)【§6.1D/E · Phase C】本轮场景与行动决策（生成前结构化决定，落库 sim_action_log）
+        action = None
+        if self.phase17:
+            try:
+                scene17 = st17.infer_scene(user_text, ev_user, self._stance or {},
+                                       meta_detector=self._meta_detector)
+                action = act17.decide(self._stance or {}, scene17, ev_user,
+                                      p_reply=self._anchored_p(), rng=self.world.clock.rng,
+                                      profile=self._profile)
+                act17.apply_expression(action, self._profile)
+                act17.log_action(self.conn, sim_id=self.sim_id, session_id=session_id,
+                                 day=day, turn_idx=turn_a, path=self.path, action=action)
+            except Exception as e:
+                if self.verbose:
+                    print(f"  [warn] 行动决策失败（回退到既有闸门）: {str(e)[:80]}", flush=True)
+                action = None
 
         # 1.5) F1 回复意愿（架构级）：判不回则不生成、不调 LLM、落库沉默标记并返回。
         #      沉默行仍计入会话轮次（时间照常流逝）；事件判定整段跳过——
         #      否则空 reply 会兜底成「日常陪伴」，对方明明沉默、关系却还在被加热。
         willingness = None
-        if pf is not None and pf.f1_enabled():
-            est = pf.estimate_reply_probability(
-                self.conn, sim_id=self.sim_id, start_day=self.start_day,
-                current_day=day, divergence_point=self.divergence_point)
+        gate_reason = None          # 闸门回退原因（Phase A：所有回退必须有原因）
+        snap = None                 # 决策时刻意愿估计快照（Phase A 观测）
+        if action is not None:
+            # phase17 模式：行动决策即闸门（should_generate 已按锚定 P 掷骰）
+            willingness = action.p_reply
+            gate_reason = (None if action.should_generate
+                           else f"not_replied;action=none;{action.decision_reason[:60]}")
+            snap = observe.snapshot_estimate(self.conn, self.sim_id, day)
+            if not action.should_generate:
+                return self._silent_return(session_id, day, turn_a, user_text, action,
+                                           snap, rel_before, gate_reason, auto_day)
+        elif pf is not None and pf.f1_enabled():
+            try:
+                est = pf.estimate_reply_probability(
+                    self.conn, sim_id=self.sim_id, start_day=self.start_day,
+                    current_day=day, divergence_point=self.divergence_point)
+            except Exception as e:
+                # 【§5.11】异常时按 config fallback 处理并记录失败原因，
+                # 不得默认 p=1.0（那等于「出问题就更热情」，方向错误）。
+                try:
+                    fb = float(pf._wcfg().get("fallback", 0.5))
+                except Exception:
+                    fb = 0.5
+                est = {"p": fb, "layer": "fallback", "samples": 0}
+                gate_reason = f"decision_error;p_reply_source=error;{str(e)[:60]}"
             willingness = est["p"]
+            snap = observe.snapshot_estimate(self.conn, self.sim_id, day)
             if self.world.clock.rng.random() > willingness:
                 if self.verbose:
                     print(f"  [意愿] TA 没回（P={willingness:.2f}，{est['layer']}，"
@@ -448,15 +736,37 @@ class DialEngine:
                 self._put_message(session_id, day, PARTNER, "",
                                   meta={"silent": True, "human": False,
                                         "willingness": round(willingness, 4)})
-                return {"day": day, "user": user_text, "reply": "", "medium": "text",
+                advanced = None
+                if auto_day and self._rounds_in_session(session_id) >= AUTO_DAY_TURNS:
+                    advanced = self.advance_day(1)      # §5.9：沉默计入回合
+                self._save_state()                       # §5.10：沉默轮也落分支状态
+                # Phase A：沉默轮决策观测
+                self._log_decision(session_id=session_id, day=day, turn_idx=turn_a,
+                                   decided=0, snapshot=snap, p_reply=willingness,
+                                   reply_mode="none",
+                                   silent_reason=(f"not_replied;layer={est['layer']} "
+                                                  f"n={est['samples']}"),
+                                   state_before=rel_before,
+                                   state_after=dict(self.rel_current or {}),
+                                   source="ported")
+                return {"day": day, "user": user_text, "reply": "", "medium": "none",
                         "action": "", "sticker": None, "emotion": None,
-                        "event": None, "event_note": None,
+                        "event": None,
+                        "event_note": {"event_type": "未回复", "times": 1,
+                                       "counted": False,
+                                       "note": f"她没回（P(reply)={willingness:.2f}）"},
                         "rel": dict(self.rel_current or {}),
-                        "session_id": session_id, "advanced_to": None,
+                        "session_id": session_id, "advanced_to": advanced,
                         "silent": True, "willingness": willingness}
+        elif pf is not None:
+            gate_reason = "gate_skipped;f1_disabled"
+        else:
+            gate_reason = "gate_skipped;pf_unavailable"
 
         # 2) 上下文装配：真实原文窗口（F2，置于最前）+ 世界 + 改写场景卡 + 记忆 + 缓冲
-        ws_text = self.world.summary_text(with_memories=False)
+        # 【§5.6】生成上下文里的状态视图改为分支当前状态 rel_current（「本分支，推断」）
+        ws_text = self.world.summary_text(with_memories=False,
+                                          rel_override=self.rel_current)
         if pf is not None and pf.f2_enabled():
             try:
                 win = pf.real_window_text(self.conn, start_day=self.start_day,
@@ -482,8 +792,15 @@ class DialEngine:
                     print(f"  [warn] 记忆检索失败: {str(e)[:80]}")
 
         # 3) B 的回应（复用 PersonaAgent.act；full_persona=产品态人格保真优先）
-        reply_obj = self.partner.act(self.client, ws_text, mem_text, self.wm.render(),
-                                     user_text, rng=self.world.clock.rng, full_persona=True)
+        buffer_text = self.wm.render()
+        # Phase A：装配摘要（只存 sha 前 16 位 + 组件长度，不落原文）
+        pdigest = observe.prompt_digest({
+            "persona": self.partner.persona_block, "ws": ws_text,
+            "mem": mem_text, "buf": buffer_text, "user": user_text})
+        # phase17：行动约束注入生成提示；boundary 轮豁免去重护栏（§6.2 步骤 7/T10）
+        reply_obj = self.partner.act(self.client, ws_text, mem_text, buffer_text,
+                                     user_text, rng=self.world.clock.rng, full_persona=True,
+                                     action=action)
 
         # 4) 落库 + 缓冲（媒介为表情包时 → 换上对方真实用过的表情图）
         sticker = self.pick_partner_sticker() if reply_obj.medium == "emoji" else None
@@ -493,8 +810,27 @@ class DialEngine:
                                 "human": False, "sticker": sticker})
         self.wm.add(day, PARTNER, reply_obj.reply or "")
 
-        # 5) 事件判定 → 关系状态（启发式，零 token；按天计权，上限见 MAX_SAME_EVENT_PER_DAY）
-        ev = classify_event(user_text, reply_obj.reply or "")
+        # 5) 事件 → 关系状态（§5.7 重构：判定在生成前已完成，这里只按行动结果计权）
+        #    phase17：boundary 行动 → 「边界重申」事件；增量在 _commit_rel 经立场门控（T9）。
+        if action is not None:
+            ev = act17.action_event(action, ev_user,
+                                    has_reply=bool((reply_obj.reply or "").strip()))
+        else:
+            ev = dict(ev_user) if ev_user else (
+                {"event_type": "日常陪伴", "severity": 1, "importance": 1}
+                if (reply_obj.reply or "").strip() else {})
+        # 【§6.2 步骤 8】生成结果校验：违反行动决策 → 记 generation_violation，不改写
+        if action is not None:
+            try:
+                v, vnote = act17.check_generation_violation(action, reply_obj.reply or "")
+                if v:
+                    action.generation_violation = v
+                    action.violation_note = vnote
+                    act17.mark_violation(self.conn, session_id, turn_a, vnote)
+                    if self.verbose:
+                        print(f"  [violation] {vnote}", flush=True)
+            except Exception:
+                pass
         ev_note = None
         if ev:
             ev["summary"] = f"{ev['event_type']}：{user_text[:14]} / {(reply_obj.reply or '')[:14]}"
@@ -507,12 +843,23 @@ class DialEngine:
                 ev_note = {"event_type": ev["event_type"], "times": 0, "counted": False,
                            "note": f"{ev['event_type']}（本次事件未记录：{str(e)[:40]}）"}
 
-        # 6) 消息驱动的时间推进
-        total = self.conn.execute("SELECT COUNT(*) FROM sim_messages WHERE session_id=?",
-                                  (session_id,)).fetchone()[0]
+        # 6) 消息驱动的时间推进（§5.9：回合计数，沉默计入回合）
         advanced = None
-        if auto_day and total >= AUTO_DAY_TURNS:
+        if auto_day and self._rounds_in_session(session_id) >= AUTO_DAY_TURNS:
             advanced = self.advance_day(1)
+
+        # Phase A：回复轮决策观测（prompt_digest + 状态前后快照）
+        self._log_decision(session_id=session_id, day=day, turn_idx=turn_a,
+                           decided=1, snapshot=snap, p_reply=willingness,
+                           reply_mode=reply_obj.medium,
+                           silent_reason=gate_reason,
+                           prompt_digest=pdigest,
+                           state_before=rel_before,
+                           state_after=dict(self.rel_current or {}),
+                           source="ported" if pf is not None else None)
+
+        # §5.10：回复轮也落分支状态（情绪/近期消息/关系在 act() 里已变）
+        self._save_state()
 
         return {"day": day, "user": user_text, "reply": reply_obj.reply or "",
                 "medium": reply_obj.medium, "action": reply_obj.action,
@@ -792,7 +1139,8 @@ def cmd_selftest(args) -> None:
     print(f"[7] 重启续聊 OK  TA 回「{res2['reply']}」")
     # 清理自检线（幂等：删掉本次 selftest 产物，避免污染线列表）
     for t in ("sim_messages", "sim_sessions", "sim_events", "sim_facts", "sim_rel_state",
-              "sim_pcc_log", "sim_working_mem"):
+              "sim_pcc_log", "sim_working_mem", "sim_decision_log",
+              "sim_branch_state", "sim_action_log"):
         conn.execute(f"DELETE FROM {t} WHERE sim_id=?", (sim_id,))
     conn.execute("DELETE FROM ifr_branch WHERE sim_id=?", (sim_id,))
     conn.execute("DELETE FROM sim_runs WHERE sim_id=?", (sim_id,))
